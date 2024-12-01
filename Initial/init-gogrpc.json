@@ -1,0 +1,8 @@
+{
+    "project": "name project",
+    "name": "name service",
+    "server": "front/back",
+    "port": "http",
+    "port2": "grpc",
+    "chart":"gogrpc-chart"
+}
