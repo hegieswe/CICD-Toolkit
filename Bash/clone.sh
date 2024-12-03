@@ -13,7 +13,7 @@ check_file_exists() {
 
 # Function to check if jq is installed
 check_jq_installed() {
-    if ! which jq > /dev/null 2>&1; then
+    if ! command -v jq > /dev/null 2>&1; then
         echo " ❌ Error: jq is not installed. Please install jq first."
         exit 1
     fi
@@ -52,12 +52,12 @@ remove_existing_directory() {
 clone_repository() {
     AUTH_URL="https://${USERNAME}:${TOKEN}@bitbucket.org/loyaltoid/$1.git"
     if git clone --branch "$2" "$AUTH_URL" "$1"; then
-        echo " ✅ The repository has been successfully cloned."
+        echo -e "\033[32m✅ The repository has been successfully cloned.\033[0m"
         echo " 📦 Repository: $1"
         echo " 🏷️  Branch/Tag: $2"
         echo " 📍 Location: $(pwd)/$1"
     else
-        echo " ❌ Failed to clone the repository."
+        echo -e "\033[31m❌ Failed to clone the repository.\033[0m"
         exit 1
     fi
 }

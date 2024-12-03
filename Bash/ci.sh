@@ -55,8 +55,8 @@ else
     COMMIT_TAG=$(git rev-parse --short=5 HEAD)
 fi
 
-# Define Docker image name (e.g., <username>/<repo-name>:<commit-id>)
-DOCKER_USERNAME="loyaltolpi"
+# Allow overriding Docker username (optional, defaults to "loyaltolpi")
+DOCKER_USERNAME="${DOCKER_USERNAME:-loyaltolpi}"
 IMAGE_TAG="${DOCKER_USERNAME}/${REPO_NAME}:${COMMIT_TAG}"
 
 # Display the Docker image information
