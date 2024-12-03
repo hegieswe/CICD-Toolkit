@@ -4,84 +4,105 @@ import subprocess
 import json
 import logging
 from pathlib import Path
-import shutil  # Import shutil untuk menghapus direktori
+import shutil  # Import shutil to remove directories
 import argparse
 
 
-# Setup logging untuk output yang lebih terstruktur
+# Setup logging for structured output with better readability
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def check_git_installed():
-    """Memeriksa apakah Git sudah terinstal di sistem."""
+    """Check if Git is installed on the system. 🚨"""
     try:
         subprocess.check_call(["git", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logging.info("✅ Git is installed!")
     except subprocess.CalledProcessError:
-        logging.error("Git tidak ditemukan. Pastikan Git telah terinstal di sistem Anda.")
+        logging.error("🚫 Git is not installed. Please install Git to proceed.")
         exit(1)
 
 def load_credentials(auth_file):
-    """Mengambil kredensial dari file JSON yang ada di direktori home pengguna."""
+    """Retrieve credentials from the JSON file located in the user's home directory. 🗝️"""
     if not auth_file.exists():
-        logging.error(f"File kredensial tidak ditemukan di: {auth_file}")
+        logging.error(f"⚠️ Credential file not found at: {auth_file}")
         return None, None
     
     try:
         with auth_file.open("r") as file:
             creds = json.load(file)
-            return creds.get("usernameBitbucket"), creds.get("tokenBitbucket")
+            username = creds.get("usernameBitbucket")
+            token = creds.get("tokenBitbucket")
+            
+            if not username or not token:
+                logging.error("❌ Invalid or missing credentials in auth.json. Please check the file.")
+                return None, None
+            
+            return username, token
     except json.JSONDecodeError:
-        logging.error(f"Terjadi kesalahan dalam membaca file JSON: {auth_file}")
+        logging.error(f"⚠️ Error reading the JSON file: {auth_file}. Please ensure it is valid JSON.")
         return None, None
 
+def remove_existing_directory(directory_path):
+    """Remove an existing directory if it exists. 🗑️"""
+    if directory_path.exists():
+        logging.info(f"⛔ The directory {directory_path.name} already exists. Deleting the old directory... 🔨")
+        try:
+            shutil.rmtree(directory_path)  # Using shutil to remove the directory
+            logging.info(f"✅ The old directory {directory_path.name} has been successfully deleted.")
+        except Exception as e:
+            logging.error(f"❌ Failed to delete the directory {directory_path.name}: {e}")
+            return False
+    return True
+
 def clone_repository(repo_name, branch_name, username, token):
-    """Melakukan cloning repository dari Bitbucket."""
-    # Menentukan URL repository Bitbucket menggunakan kredensial
+    """Clone a repository from Bitbucket. 🔄"""
+    # Constructing the Bitbucket repository URL using credentials
     bitbucket_url = f"https://{username}:{token}@bitbucket.org/loyaltoid/{repo_name}.git"
     
-    # Menentukan direktori tempat cloning
+    # Define the directory for cloning
     clone_dir = Path.cwd() / repo_name
     
-    # Periksa apakah folder dengan nama repo sudah ada, hapus jika perlu
-    if clone_dir.exists():
-        logging.warning(f"Direktori {repo_name} sudah ada. Menghapus direktori lama...")
-        try:
-            shutil.rmtree(clone_dir)  # Menggunakan shutil untuk menghapus direktori
-            logging.info(f"Direktori {repo_name} berhasil dihapus.")
-        except Exception as e:
-            logging.error(f"Gagal menghapus direktori {repo_name}: {e}")
-            return
+    # Remove any existing directory before cloning
+    if not remove_existing_directory(clone_dir):
+        return
 
-    # Clone repository
+    # Log the cloning process, simulating the output from a git clone
+    logging.info(f"🌟 Cloning repository '{repo_name}'... Please wait...")
+
     try:
-        logging.info(f"Cloning repository {repo_name} dari branch {branch_name}...")
+        # Execute the git clone command
         subprocess.check_call(["git", "clone", "-b", branch_name, bitbucket_url, str(clone_dir)])
-        logging.info(f"Repository {repo_name} berhasil di-clone ke {clone_dir}.")
+        
+        # Log successful cloning
+        logging.info(f"🎉 Repository '{repo_name}' has been successfully cloned.")
+        logging.info(f"📦 Repository: {repo_name}")
+        logging.info(f"🔖 Branch/Tag: {branch_name}")
+        logging.info(f"📍 Location: {clone_dir}")
     except subprocess.CalledProcessError as e:
-        logging.error(f"Terjadi kesalahan saat cloning: {e}")
+        logging.error(f"⚠️ Error occurred during cloning: {e}")
 
 def main():
-    """Fungsi utama untuk menjalankan script."""
-    # Memeriksa apakah git terinstal
+    """Main function to execute the script. 🚀"""
+    # Check if Git is installed
     check_git_installed()
 
-    # Mengatur parser untuk menerima argumen dari command line
-    parser = argparse.ArgumentParser(description="Clone repository dari Bitbucket")
-    parser.add_argument("repo_name", help="Nama repository yang akan di-clone")
-    parser.add_argument("branch_name", help="Nama branch yang akan di-checkout")
+    # Set up argparse to accept command line arguments
+    parser = argparse.ArgumentParser(description="Clone a repository from Bitbucket")
+    parser.add_argument("repo_name", help="The name of the repository to clone 🔄")
+    parser.add_argument("branch_name", help="The branch or tag to checkout 🔖")
     
-    # Mendapatkan argumen dari command line
+    # Get arguments from the command line
     args = parser.parse_args()
 
-    # Mendapatkan kredensial pengguna
-    home_dir = Path.home()  # Menggunakan pathlib untuk direktori home
+    # Retrieve user credentials
+    home_dir = Path.home()  # Using pathlib for the home directory
     auth_file = home_dir / ".devops" / "auth.json"
     
     username, token = load_credentials(auth_file)
     if not username or not token:
-        logging.error("Kredensial tidak valid, pastikan file auth.json sudah benar.")
+        logging.error("❌ Invalid credentials. Please ensure the auth.json file is correct. 🛑")
         return
 
-    # Panggil fungsi cloning repository
+    # Call the function to clone the repository
     clone_repository(args.repo_name, args.branch_name, username, token)
 
 if __name__ == "__main__":
