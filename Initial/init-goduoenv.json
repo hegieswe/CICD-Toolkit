@@ -1,6 +1,6 @@
 {
-    "project": "name project",
-    "name": "name service",
+    "project": "name_project",
+    "name": "name_service",
     "server": "front/back",
     "port": "http",
     "chart":"goduoenv-chart"
