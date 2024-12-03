@@ -1,0 +1,63 @@
+# Stage 1: Build the Go application
+FROM golang:1.21-alpine3.20 AS builder
+
+# Maintainer information
+LABEL maintainer="Hegi <hegi@qoin.id>"
+
+# Build arguments
+ARG PROJECT
+
+# Install required dependencies securely
+RUN apk --no-cache add git gcc g++ tzdata ca-certificates
+
+# Set working directory
+WORKDIR /go/src/${PROJECT}
+
+# Copy go.mod and go.sum and install dependencies
+COPY go.mod go.sum ./
+RUN go mod download && go mod tidy
+
+# Copy the rest of the source code
+COPY . .
+
+# Build the Go application
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o /go/bin/${PROJECT} main.go
+
+# Stage 2: Create a lightweight runtime image
+FROM alpine:3.20.2
+
+# Build arguments
+ARG PROJECT
+ARG PORT
+
+# Environment variables
+ENV TIMEZONE=Asia/Jakarta
+
+# Install tzdata and set the timezone securely
+RUN apk --no-cache add tzdata ca-certificates && \
+    cp /usr/share/zoneinfo/${TIMEZONE} /etc/localtime && \
+    echo "${TIMEZONE}" > /etc/timezone && \
+    apk del tzdata
+
+# Create and set up entrypoint scripts before switching to non-root user
+RUN mkdir -p /home/appuser/logs && \
+    printf "#!/bin/sh\n\nwhile true; do\n\techo \"[INFO] Starting Service at \$(date)\"\n\t(/usr/local/bin/${PROJECT} >> /home/appuser/logs/history.log || echo \"[ERROR] Restarting Service at \$(date)\")\ndone" > /usr/local/bin/run.sh && \
+    printf "#!/bin/sh\n[ ! -f /home/appuser/logs/history.log ] && touch /home/appuser/logs/history.log\n/usr/local/bin/run.sh & tail -F /home/appuser/logs/history.log" > /usr/local/bin/up.sh && \
+    chmod +x /usr/local/bin/up.sh /usr/local/bin/run.sh
+
+# Create a non-root user and set permissions
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /home/appuser/logs
+
+# Switch to non-root user
+USER appuser
+
+# Expose the application port
+EXPOSE ${PORT}
+
+# Copy the built Go binary and certificates from the builder stage
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /go/bin/${PROJECT} /usr/local/bin/${PROJECT}
+
+# Set the entrypoint
+CMD ["/usr/local/bin/up.sh"]
