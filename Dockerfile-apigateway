@@ -1,0 +1,42 @@
+# Stage 1: Build Stage
+FROM krakend/krakend-ee:2.7 AS builder
+
+# Copy the template and configuration files
+COPY krakend.tmpl /etc/krakend/krakend.tmpl
+COPY config/settings /etc/krakend/settings
+COPY config/partials /etc/krakend/partials
+
+# Validate the configuration template using krakend check
+RUN FC_ENABLE=1 \
+    FC_OUT=/tmp/krakend.json \
+    FC_PARTIALS="/etc/krakend/partials" \
+    FC_SETTINGS="/etc/krakend/settings" \
+    krakend check -d -t -c /etc/krakend/krakend.tmpl
+
+# Perform a check on the generated krakend.json file
+RUN krakend check -c /tmp/krakend.json
+
+# Stage 2: Final Stage
+FROM krakend/krakend-ee:2.7
+
+# Define the PORT ARG to expose the port
+ARG PORT=8005
+
+# Copy the built krakend.json file from the builder stage to the final image
+# Use chown to ensure correct file permissions
+COPY --from=builder --chown=krakend:krakend /tmp/krakend.json /etc/krakend/krakend.json
+
+# Add labels for image metadata
+LABEL org.opencontainers.image.authors="hegi@qoin.id" \
+      org.opencontainers.image.version="2.7" \
+      org.opencontainers.image.description="SAAS API Gateway"
+
+# Use the non-root user (default user krakend in the image)
+USER krakend
+
+# Expose the specified port for the container
+EXPOSE ${PORT}
+
+# Define the entrypoint and the default command to run krakend
+ENTRYPOINT ["/usr/bin/krakend"]
+CMD ["run", "-c", "/etc/krakend/krakend.json"]
