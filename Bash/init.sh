@@ -84,6 +84,16 @@ init_project() {
     remove_existing "DevOps/Values/values.yaml"
     download_file "$VALUES_YAML_URL" "DevOps/Values/values.yaml"
 
+    # Membuat tiga salinan values.yaml
+    echo "📝 [COPIES] Creating develop-values.yaml, staging-values.yaml, and production-values.yaml..."
+    cp DevOps/Values/values.yaml DevOps/Values/develop-values.yaml
+    cp DevOps/Values/values.yaml DevOps/Values/staging-values.yaml
+    cp DevOps/Values/values.yaml DevOps/Values/production-values.yaml
+
+    # Menghapus values.yaml asli
+    echo "🗑️ [CLEANUP] Removing original values.yaml..."
+    rm DevOps/Values/values.yaml
+
     echo "🎉 [SUCCESS] Project '$PROJECT_NAME' initialized successfully."
 }
 
