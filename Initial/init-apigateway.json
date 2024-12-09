@@ -3,5 +3,5 @@
     "name": "name_service",
     "server": "front/back",
     "port": "http",
-    "chart":"apigateway-chart "
+    "chart":"apigateway-chart"
 }
