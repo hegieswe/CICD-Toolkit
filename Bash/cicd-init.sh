@@ -76,8 +76,8 @@ init_project() {
 
     # Hapus dan download ulang JSON file
     echo "📄 [JSON] Downloading initialization file..."
-    remove_existing "DevOps/init.json"
-    download_file "$INIT_JSON_URL" "DevOps/init.json"
+    remove_existing "DevOps/cicd-init.json"
+    download_file "$INIT_JSON_URL" "DevOps/cicd-init.json"
 
     # Hapus dan download ulang YAML helm-chart file
     echo "⚙️ [HELM-CHART] Downloading helm-chart values..."
