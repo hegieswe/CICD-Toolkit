@@ -1,5 +1,5 @@
 # Stage 1: Build Stage
-FROM krakend/krakend-ee:2.7 AS builder
+FROM krakend/krakend-ee:2.8 AS builder
 
 # Copy the template and configuration files
 COPY krakend.tmpl /etc/krakend/krakend.tmpl
@@ -17,7 +17,7 @@ RUN FC_ENABLE=1 \
 RUN krakend check -c /tmp/krakend.json
 
 # Stage 2: Final Stage
-FROM krakend/krakend-ee:2.7
+FROM krakend/krakend-ee:2.8
 
 # Define the PORT ARG to expose the port
 ARG PORT=8005
