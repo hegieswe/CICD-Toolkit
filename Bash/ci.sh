@@ -52,7 +52,7 @@ TAG=$(git describe --tags --exact-match 2>/dev/null)
 if [ -n "$TAG" ]; then
     COMMIT_TAG="$TAG"
 else
-    COMMIT_TAG=$(git rev-parse --short=5 HEAD)
+    COMMIT_TAG=$(git rev-parse --short=7 HEAD)
 fi
 
 # Allow overriding Docker username (optional, defaults to "loyaltolpi")
