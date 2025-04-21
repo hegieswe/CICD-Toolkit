@@ -1,5 +1,5 @@
 # Stage 1: Build Stage
-FROM krakend/krakend-ee:2.8 AS builder
+FROM krakend/krakend-ee:2.9 AS builder
 
 # Copy the template and configuration files
 COPY krakend.tmpl /etc/krakend/krakend.tmpl
