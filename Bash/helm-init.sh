@@ -68,4 +68,4 @@ yq e -i ".volumes[0].name = \"secret-${PROJECT}-volume\"" "$VALUES_FILE"
 yq e -i ".volumes[0].secret.secretName = \"secret-$NAME\"" "$VALUES_FILE"
 yq e -i ".volumeMounts[0].name = \"secret-${PROJECT}-volume\"" "$VALUES_FILE"
 
-echo "✅ Berhasil parsing metadata ke file Helm values untuk environment: $ENV"
+echo "✅ Parsing metadata environment: $ENV"
