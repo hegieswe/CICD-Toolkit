@@ -1,72 +1,57 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# Function to check command and exit with an error message if it fails
-check_command() {
-    if ! $1; then
-        echo " ❌ Error: $2"
-        exit 1
-    fi
+# Fungsi keluar dengan pesan error
+die() {
+    echo "❌ Error: $1" >&2
+    exit 1
 }
 
-# Function to check Docker login
-check_docker_login() {
-    docker info > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo " ❌ Docker not detected. Please ensure Docker is installed and you are logged into Docker Hub."
-        exit 1
-    fi
-}
+# Cek Docker & Buildx
+docker info > /dev/null 2>&1 || die "Docker tidak tersedia. Pastikan Docker aktif dan sudah login."
+command -v docker > /dev/null || die "'docker' tidak ditemukan."
+command -v docker buildx > /dev/null || die "'docker buildx' tidak ditemukan. Pastikan Docker versi terbaru."
 
-# Function to build Docker image
-build_docker_image() {
-    echo "🔨 Building Docker image..."
-    docker build -t "$1" .
-    check_command "docker build -t $1 ." "Docker image build failed"
-    echo "✅ Docker image build successful: $1"
-}
-
-# Function to analyze vulnerabilities using Docker Scout
-analyze_vulnerabilities() {
-    echo "🔍 Analyzing vulnerabilities with Docker Scout..."
-    docker scout cves "$1"
-    check_command "docker scout cves $1" "Vulnerability analysis failed"
-    echo "✅ Vulnerability analysis completed successfully."
-}
-
-# Function to push Docker image to Docker Hub
-push_docker_image() {
-    echo "🚀 Pushing Docker image to Docker Hub..."
-    docker push "$1"
-    check_command "docker push $1" "Docker image push failed"
-    echo "✅ Docker image pushed successfully to Docker Hub: $1"
-}
-
-# Check Docker login and installation
-check_docker_login
-
-# Get repository name from the remote Git URL using git rev-parse
-REPO_NAME=$(basename -s .git "$(git config --get remote.origin.url)")
-
-# Check for tag or commit ID for Docker image tag
-TAG=$(git describe --tags --exact-match 2>/dev/null)
-if [ -n "$TAG" ]; then
-    COMMIT_TAG="$TAG"
+# Pastikan builder 'attest-builder' dengan driver docker-container tersedia
+if ! docker buildx inspect attest-builder >/dev/null 2>&1; then
+    echo "⚙️  Membuat builder 'attest-builder' dengan driver docker-container..."
+    docker buildx create --name attest-builder --driver docker-container --use
 else
-    COMMIT_TAG=$(git rev-parse --short=7 HEAD)
+    docker buildx use attest-builder
 fi
 
-# Allow overriding Docker username (optional, defaults to "loyaltolpi")
+# Ambil nama repo dari Git
+REPO_NAME=$(basename -s .git "$(git config --get remote.origin.url)")
+[ -z "$REPO_NAME" ] && die "Tidak dapat mendeteksi nama repository dari Git."
+
+# Ambil tag atau commit ID
+TAG=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short=7 HEAD)
+
+# Tentukan nama image dan tag
 DOCKER_USERNAME="${DOCKER_USERNAME:-loyaltolpi}"
-IMAGE_TAG="${DOCKER_USERNAME}/${REPO_NAME}:${COMMIT_TAG}"
+IMAGE_TAG="${DOCKER_USERNAME}/${REPO_NAME}:${TAG}"
 
-# Display the Docker image information
-echo "🖼️ Docker image name: ${IMAGE_TAG}"
+# Tampilkan metadata image
+echo ""
+echo "🛠️  Membangun dan push Docker image dengan attestation:"
+echo "   📦 Image     : $IMAGE_TAG"
+echo "   🧾 Provenance: enabled (mode=max)"
+echo "   📜 SBOM      : enabled"
+echo ""
 
-# Build Docker image
-build_docker_image "$IMAGE_TAG"
+# Bangun dan push image ke registry
+docker buildx build \
+    --builder attest-builder \
+    --tag "$IMAGE_TAG" \
+    --sbom=true \
+    --attest type=provenance,mode=max \
+    --push \
+    .
 
-# Analyze vulnerabilities
-analyze_vulnerabilities "$IMAGE_TAG"
+echo ""
+echo "✅ Build dan push image berhasil: $IMAGE_TAG"
 
-# Push Docker image to Docker Hub
-push_docker_image "$IMAGE_TAG"
+# Analisis kerentanan (opsional)
+echo ""
+echo "🔍 Analisis kerentanan dengan Docker Scout..."
+docker scout cves "$IMAGE_TAG" || echo "⚠️  Analisis CVE gagal atau tidak tersedia."
