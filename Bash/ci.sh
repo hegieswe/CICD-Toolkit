@@ -41,6 +41,7 @@ echo ""
 
 # Bangun dan push image ke registry
 docker buildx build \
+    --no-cache \
     --builder attest-builder \
     --tag "$IMAGE_TAG" \
     --sbom=true \
