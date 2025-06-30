@@ -1,45 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fungsi keluar dengan pesan error
+# Exit with an error message
 die() {
     echo "❌ Error: $1" >&2
     exit 1
 }
 
-# Cek Docker & Buildx
-docker info > /dev/null 2>&1 || die "Docker tidak tersedia. Pastikan Docker aktif dan sudah login."
-command -v docker > /dev/null || die "'docker' tidak ditemukan."
-command -v docker buildx > /dev/null || die "'docker buildx' tidak ditemukan. Pastikan Docker versi terbaru."
+# Check Docker and Buildx availability
+docker info > /dev/null 2>&1 || die "Docker is not available. Make sure Docker is running and you're logged in."
+command -v docker > /dev/null || die "'docker' command not found."
+command -v docker buildx > /dev/null || die "'docker buildx' is required. Please update Docker."
 
-# Pastikan builder 'attest-builder' dengan driver docker-container tersedia
+# Ensure the 'attest-builder' exists with docker-container driver
 if ! docker buildx inspect attest-builder >/dev/null 2>&1; then
-    echo "⚙️  Membuat builder 'attest-builder' dengan driver docker-container..."
+    echo "⚙️  Creating builder 'attest-builder' with docker-container driver..."
     docker buildx create --name attest-builder --driver docker-container --use
 else
     docker buildx use attest-builder
 fi
 
-# Ambil nama repo dari Git
+# Get repository name from Git
 REPO_NAME=$(basename -s .git "$(git config --get remote.origin.url)")
-[ -z "$REPO_NAME" ] && die "Tidak dapat mendeteksi nama repository dari Git."
+[ -z "$REPO_NAME" ] && die "Unable to determine repository name from Git."
 
-# Ambil tag atau commit ID
+# Get Git tag or fallback to short commit hash
 TAG=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short=7 HEAD)
 
-# Tentukan nama image dan tag
+# Set Docker Hub username (default: loyaltolpi)
 DOCKER_USERNAME="${DOCKER_USERNAME:-loyaltolpi}"
 IMAGE_TAG="${DOCKER_USERNAME}/${REPO_NAME}:${TAG}"
 
-# Tampilkan metadata image
+# Display build information
 echo ""
-echo "🛠️  Membangun dan push Docker image dengan attestation:"
+echo "🛠️  Building and pushing Docker image with attestations:"
 echo "   📦 Image     : $IMAGE_TAG"
 echo "   🧾 Provenance: enabled (mode=max)"
 echo "   📜 SBOM      : enabled"
 echo ""
 
-# Bangun dan push image ke registry
+# Build and push the image with attestations
 docker buildx build \
     --no-cache \
     --builder attest-builder \
@@ -50,9 +50,4 @@ docker buildx build \
     .
 
 echo ""
-echo "✅ Build dan push image berhasil: $IMAGE_TAG"
-
-# Analisis kerentanan (opsional)
-echo ""
-echo "🔍 Analisis kerentanan dengan Docker Scout..."
-docker scout cves "$IMAGE_TAG" || echo "⚠️  Analisis CVE gagal atau tidak tersedia."
+echo "✅ Image built and pushed successfully: $IMAGE_TAG"
