@@ -1,0 +1,78 @@
+###########################
+# Stage 1: Build the Go Application
+###########################
+
+# Use Go base image with Alpine for lightweight build environment
+FROM golang:1.24-alpine3.22 AS builder
+
+# Maintainer info
+LABEL maintainer="Hegi <hegi@qoin.id>"
+
+# Build argument to set project name (used for output binary name)
+ARG PROJECT
+
+# Install essential build tools and CA certificates
+RUN apk --no-cache add git gcc g++ tzdata ca-certificates wget
+
+# Set working directory inside the container
+WORKDIR /go/src/${PRsOJECT}
+
+# Copy Go module files first to leverage Docker layer caching
+COPY go.mod go.sum ./
+RUN go mod download && go mod tidy
+
+# Copy application source code into the container
+COPY . .
+
+# Build statically-linked Go binary for Linux (amd64)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -a -installsuffix cgo -o /go/bin/${PROJECT} main.go
+
+# Download gRPC health probe binary used for liveness checks in Kubernetes
+ENV GRPC_HEALTH_PROBE_VERSION=v0.4.39
+RUN wget -qO /bin/grpc_health_probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64 && \
+    chmod +x /bin/grpc_health_probe
+
+############################
+# Stage 2: Lightweight Runtime Image
+############################
+
+# Use minimal Alpine base image for production runtime
+FROM alpine:3.22.1
+
+# Arguments passed during build time
+ARG PROJECT
+ARG PORT
+
+# Set the timezone
+ENV TIMEZONE=Asia/Jakarta
+
+# Install CA certificates and set timezone
+RUN apk --no-cache add tzdata ca-certificates && \
+    cp /usr/share/zoneinfo/${TIMEZONE} /etc/localtime && \
+    echo "${TIMEZONE}" > /etc/timezone && \
+    apk del tzdata  # remove tzdata to reduce image size
+
+# Create directory for logs and initialize run scripts
+RUN mkdir -p /home/appuser/logs && \
+    printf "#!/bin/sh\n\nwhile true; do\n\techo \"[INFO] Starting Service at \$(date)\"\n\t(/usr/local/bin/${PROJECT} >> /home/appuser/logs/history.log || echo \"[ERROR] Restarting Service at \$(date)\")\ndone" > /usr/local/bin/run.sh && \
+    printf "#!/bin/sh\n[ ! -f /home/appuser/logs/history.log ] && touch /home/appuser/logs/history.log\n/usr/local/bin/run.sh & tail -F /home/appuser/logs/history.log" > /usr/local/bin/up.sh && \
+    chmod +x /usr/local/bin/up.sh /usr/local/bin/run.sh
+
+# Create a non-root user for security
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /home/appuser/logs
+
+# Switch to non-root user
+USER appuser
+
+# Expose application port
+EXPOSE ${PORT}
+
+# Copy necessary runtime files from the builder stage
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /go/bin/${PROJECT} /usr/local/bin/${PROJECT}
+COPY --from=builder /bin/grpc_health_probe /bin/grpc_health_probe
+
+# Set the container's entrypoint
+CMD ["/usr/local/bin/up.sh"]
