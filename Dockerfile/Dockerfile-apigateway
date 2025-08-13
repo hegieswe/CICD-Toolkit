@@ -1,5 +1,5 @@
 # Stage 1: Build Stage
-FROM krakend/krakend-ee:2.9 AS builder
+FROM krakend:2.10.2 AS builder
 
 # Copy the template and configuration files
 COPY krakend.tmpl /etc/krakend/krakend.tmpl
@@ -17,7 +17,7 @@ RUN FC_ENABLE=1 \
 RUN krakend check -c /tmp/krakend.json
 
 # Stage 2: Final Stage
-FROM krakend/krakend-ee:2.8
+FROM krakend:2.10.2
 
 # Define the PORT ARG to expose the port
 ARG PORT=8005
@@ -28,7 +28,7 @@ COPY --from=builder --chown=krakend:krakend /tmp/krakend.json /etc/krakend/krake
 
 # Add labels for image metadata
 LABEL org.opencontainers.image.authors="hegi@qoin.id" \
-      org.opencontainers.image.version="2.7" \
+      org.opencontainers.image.version="2.10.2" \
       org.opencontainers.image.description="SAAS API Gateway"
 
 # Use the non-root user (default user krakend in the image)
