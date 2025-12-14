@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
+YELLOW = "\033[33m"
+RESET = "\033[0m"
+
+def info(label, value, icon):
+    print(f"{YELLOW}{icon} {label:<15}: {value}{RESET}")
+
+def run(cmd):
+    print(f"▶ {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+def git_output(cmd):
+    return subprocess.check_output(
+        cmd,
+        stderr=subprocess.DEVNULL
+    ).decode().strip()
+
+# --------------------------------------------------
+# Path & constants
+# --------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "cicd" / "cicd.json"
+
+DOCKER_ORG = "loyaltolpi"
+BUILDER_NAME = "attest-builder"
+PLATFORM = "linux/amd64"
+
+# --------------------------------------------------
+# Load config
+# --------------------------------------------------
+if not CONFIG_FILE.exists():
+    print(f"Config file tidak ditemukan: {CONFIG_FILE}")
+    sys.exit(1)
+
+with CONFIG_FILE.open() as f:
+    config = json.load(f)
+
+IMAGE_NAME = config.get("IMAGE")
+if not IMAGE_NAME:
+    print("IMAGE tidak ditemukan di cicd.json")
+    sys.exit(1)
+
+# --------------------------------------------------
+# Detect git tag vs branch
+# --------------------------------------------------
+try:
+    GIT_TAG = git_output(["git", "describe", "--tags", "--exact-match"])
+except subprocess.CalledProcessError:
+    GIT_TAG = ""
+
+if GIT_TAG:
+    IMAGE_TAG = GIT_TAG
+    BUILD_BRANCH = "production"
+else:
+    IMAGE_TAG = git_output(["git", "rev-parse", "--short=7", "HEAD"])
+    BUILD_BRANCH = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+
+FULL_IMAGE_NAME = f"{DOCKER_ORG}/{IMAGE_NAME}:{IMAGE_TAG}"
+
+# --------------------------------------------------
+# Ensure buildx builder
+# --------------------------------------------------
+try:
+    run(["docker", "buildx", "use", BUILDER_NAME])
+except subprocess.CalledProcessError:
+    run(["docker", "buildx", "create", "--name", BUILDER_NAME, "--use"])
+
+# --------------------------------------------------
+# Build summary
+# --------------------------------------------------
+print()
+info("Image", FULL_IMAGE_NAME, "🐳")
+info("Platform", PLATFORM, "🧱")
+info("Build ARG", f"BRANCH={BUILD_BRANCH}", "🔧")
+info("Builder", BUILDER_NAME, "🏗️")
+print()
+
+# --------------------------------------------------
+# Build & push
+# --------------------------------------------------
+run([
+    "docker", "buildx", "build",
+    "--platform", PLATFORM,
+    "--no-cache",
+    "--builder", BUILDER_NAME,
+    "--build-arg", f"BRANCH={BUILD_BRANCH}",
+    "--tag", FULL_IMAGE_NAME,
+    "--attest", "type=provenance,mode=max",
+    "--push",
+    "."
+])
+
+print()
+print("✅ Image pushed successfully")

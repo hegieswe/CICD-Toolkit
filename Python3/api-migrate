@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+
+import json
+import sys
+from pathlib import Path
+
+def fatal(msg, code=1):
+    print(f"ERROR: {msg}")
+    sys.exit(code)
+
+INPUT = Path("apigateway.json")
+
+PARTIAL_DIR = Path("config/partials")
+SETTINGS_DIR = Path("config/settings")
+
+# -------------------------------------------------
+# Validasi input file
+# -------------------------------------------------
+if not INPUT.exists():
+    fatal("File 'apigateway.json' tidak ditemukan. Jalankan perintah dari direktori yang benar.")
+
+# -------------------------------------------------
+# Prepare directory
+# -------------------------------------------------
+try:
+    PARTIAL_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    fatal(f"Gagal membuat direktori output: {e}")
+
+# -------------------------------------------------
+# Load JSON
+# -------------------------------------------------
+try:
+    with INPUT.open("r") as f:
+        data = json.load(f)
+except json.JSONDecodeError as e:
+    fatal(f"Format JSON tidak valid: {e}")
+except Exception as e:
+    fatal(f"Gagal membaca apigateway.json: {e}")
+
+# -------------------------------------------------
+# Validasi struktur minimal (aman untuk KrakenD)
+# -------------------------------------------------
+for key in ("endpoints", "extra_config"):
+    if key not in data:
+        fatal(f"Key '{key}' tidak ditemukan di apigateway.json")
+
+endpoints = data["endpoints"]
+
+JUMLAH = len(endpoints)
+ARRAY_COUNT = JUMLAH - 1
+
+print(f"JUMLAH : {JUMLAH}")
+
+# -------------------------------------------------
+# global_extra_config.tmpl
+# -------------------------------------------------
+try:
+    extra_config_raw = json.dumps(data["extra_config"], indent=2)
+    lines = extra_config_raw.splitlines()
+    content = "\n".join(lines[1:])
+    content = content[:-2]
+
+    with (PARTIAL_DIR / "global_extra_config.tmpl").open("w") as f:
+        f.write(content)
+except Exception as e:
+    fatal(f"Gagal membuat global_extra_config.tmpl: {e}")
+
+# -------------------------------------------------
+# service.json
+# -------------------------------------------------
+try:
+    service = {
+        "name": data.get("name"),
+        "port": data.get("port"),
+        "cache_ttl": data.get("cache_ttl"),
+        "timeout": data.get("timeout"),
+    }
+
+    with (SETTINGS_DIR / "service.json").open("w") as f:
+        json.dump(service, f, indent=2)
+except Exception as e:
+    fatal(f"Gagal membuat service.json: {e}")
+
+# -------------------------------------------------
+# endpoint.json
+# -------------------------------------------------
+endpoint_file = SETTINGS_DIR / "endpoint.json"
+
+try:
+    with endpoint_file.open("w") as f:
+        f.write('{"mapping_group": [\n')
+
+        for i in range(0, ARRAY_COUNT + 1):
+            INDEX = i + 1
+            ep = endpoints[i]
+
+            endpoint_path = ep.get("endpoint", "")
+            name_endpoint = endpoint_path[1:] if endpoint_path.startswith("/") else endpoint_path
+
+            print(f" {INDEX} => ENDPOINT: {name_endpoint}")
+
+            # partial endpoint
+            with (PARTIAL_DIR / str(INDEX)).open("w") as pf:
+                json.dump(ep, pf, indent=2)
+
+            obj = {
+                "id": str(INDEX),
+                "endpoint": ep.get("endpoint"),
+                "method": ep.get("method"),
+                "host": ep["backend"][0]["host"][0],
+            }
+
+            f.write(json.dumps(obj))
+            f.write(",\n")
+
+            print("-------------------------------")
+
+        # truncate ",\n"
+        f.seek(f.tell() - 2)
+        f.truncate()
+        f.write("\n]}")
+
+except KeyError as e:
+    fatal(f"Struktur endpoint tidak sesuai (key hilang): {e}")
+except Exception as e:
+    fatal(f"Gagal memproses endpoint: {e}")
