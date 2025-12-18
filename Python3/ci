@@ -1,102 +1,188 @@
 #!/usr/bin/env python3
+"""
+CI Script - Docker Build & Push dengan output JSON untuk CD pipeline.
+
+Usage:
+    ci              # Build dan push image
+    ci --dry-run    # Tampilkan info tanpa build
+"""
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 # --------------------------------------------------
-# Helpers
+# Constants
 # --------------------------------------------------
-YELLOW = "\033[33m"
-RESET = "\033[0m"
-
-def info(label, value, icon):
-    print(f"{YELLOW}{icon} {label:<15}: {value}{RESET}")
-
-def run(cmd):
-    print(f"▶ {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-
-def git_output(cmd):
-    return subprocess.check_output(
-        cmd,
-        stderr=subprocess.DEVNULL
-    ).decode().strip()
-
-# --------------------------------------------------
-# Path & constants
-# --------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_FILE = BASE_DIR / "cicd" / "cicd.json"
-
 DOCKER_ORG = "loyaltolpi"
 BUILDER_NAME = "attest-builder"
 PLATFORM = "linux/amd64"
 
+# Colors
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+
 # --------------------------------------------------
-# Load config
+# Helper Functions
 # --------------------------------------------------
-if not CONFIG_FILE.exists():
-    print(f"Config file tidak ditemukan: {CONFIG_FILE}")
+def info(label: str, value: str, icon: str = "•") -> None:
+    """Print formatted info line."""
+    print(f"{CYAN}{icon} {label:<12}{RESET}: {BOLD}{value}{RESET}")
+
+
+def error(message: str) -> None:
+    """Print error message and exit."""
+    print(f"{RED}✖ Error: {message}{RESET}")
     sys.exit(1)
 
-with CONFIG_FILE.open() as f:
-    config = json.load(f)
 
-IMAGE_NAME = config.get("IMAGE")
-if not IMAGE_NAME:
-    print("IMAGE tidak ditemukan di cicd.json")
-    sys.exit(1)
+def success(message: str) -> None:
+    """Print success message."""
+    print(f"{GREEN}✔ {message}{RESET}")
+
+
+def run(cmd: list[str], silent: bool = False) -> None:
+    """Run command with output."""
+    if not silent:
+        print(f"{YELLOW}▶ {' '.join(cmd)}{RESET}")
+    subprocess.run(cmd, check=True)
+
+
+def git(*args: str) -> str:
+    """Run git command and return output."""
+    return subprocess.check_output(
+        ["git", *args],
+        stderr=subprocess.DEVNULL
+    ).decode().strip()
+
+
+def get_git_info() -> tuple[str, str]:
+    """
+    Get image tag and branch from git.
+    Returns: (tag, branch)
+    """
+    try:
+        # Check if on exact tag
+        tag = git("describe", "--tags", "--exact-match")
+        return tag, "production"
+    except subprocess.CalledProcessError:
+        # Use short commit hash as tag
+        short_sha = git("rev-parse", "--short=7", "HEAD")
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        return short_sha, branch
+
+
+def ensure_builder(name: str) -> None:
+    """Ensure buildx builder exists and is active."""
+    try:
+        # Check if builder exists
+        result = subprocess.run(
+            ["docker", "buildx", "inspect", name],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            run(["docker", "buildx", "use", name], silent=True)
+        else:
+            raise subprocess.CalledProcessError(1, "inspect")
+    except subprocess.CalledProcessError:
+        print(f"{CYAN}📦 Creating builder '{name}'...{RESET}")
+        run(["docker", "buildx", "create", "--name", name, "--use"])
+
+
+def load_config(config_path: Path) -> dict:
+    """Load and validate config file."""
+    if not config_path.exists():
+        error(f"Config tidak ditemukan: {config_path}")
+    
+    with config_path.open() as f:
+        config = json.load(f)
+    
+    if not config.get("IMAGE"):
+        error("'IMAGE' tidak ditemukan di cicd.json")
+    
+    return config
+
 
 # --------------------------------------------------
-# Detect git tag vs branch
+# Main
 # --------------------------------------------------
-try:
-    GIT_TAG = git_output(["git", "describe", "--tags", "--exact-match"])
-except subprocess.CalledProcessError:
-    GIT_TAG = ""
+def main() -> None:
+    # Parse args
+    dry_run = "--dry-run" in sys.argv or "-n" in sys.argv
+    
+    # Paths
+    repo_dir = Path.cwd()
+    config_file = repo_dir / "cicd" / "cicd.json"
+    output_file = repo_dir / "build-output.json"
+    
+    # Load config
+    config = load_config(config_file)
+    image_name = config["IMAGE"]
+    
+    # Get git info
+    image_tag, branch = get_git_info()
+    full_image = f"{DOCKER_ORG}/{image_name}:{image_tag}"
+    
+    # Print build info
+    print()
+    print(f"{BOLD}╭─ Build Info ────────────────────────────────────────────────────╮{RESET}")
+    info("Image", full_image, "🐳")
+    info("Platform", PLATFORM, "🧱")
+    info("Branch", branch, "🌿")
+    info("Builder", BUILDER_NAME, "🏗️")
+    print(f"{BOLD}╰─────────────────────────────────────────────────────────────────╯{RESET}")
+    print()
+    
+    if dry_run:
+        print(f"{YELLOW}⚠ Dry run mode - skipping build{RESET}")
+        return
+    
+    # Ensure builder
+    ensure_builder(BUILDER_NAME)
+    
+    # Build & push
+    run([
+        "docker", "buildx", "build",
+        "--platform", PLATFORM,
+        "--no-cache",
+        "--builder", BUILDER_NAME,
+        "--build-arg", f"BRANCH={branch}",
+        "--tag", full_image,
+        "--attest", "type=provenance,mode=max",
+        "--push",
+        "."
+    ])
+    
+    # Generate output JSON
+    build_output = {
+        "image": f"{DOCKER_ORG}/{image_name}",
+        "tag": image_tag,
+        "branch": branch
+    }
+    
+    # Write to file
+    output_file.write_text(json.dumps(build_output, indent=2))
+    
+    # Print result
+    print()
+    success("Image pushed successfully!")
+    print()
+    print(f"{GREEN}📄 Build Output → {output_file}{RESET}")
+    print(json.dumps(build_output, indent=2))
 
-if GIT_TAG:
-    IMAGE_TAG = GIT_TAG
-    BUILD_BRANCH = "production"
-else:
-    IMAGE_TAG = git_output(["git", "rev-parse", "--short=7", "HEAD"])
-    BUILD_BRANCH = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"])
 
-FULL_IMAGE_NAME = f"{DOCKER_ORG}/{IMAGE_NAME}:{IMAGE_TAG}"
-
-# --------------------------------------------------
-# Ensure buildx builder
-# --------------------------------------------------
-try:
-    run(["docker", "buildx", "use", BUILDER_NAME])
-except subprocess.CalledProcessError:
-    run(["docker", "buildx", "create", "--name", BUILDER_NAME, "--use"])
-
-# --------------------------------------------------
-# Build summary
-# --------------------------------------------------
-print()
-info("Image", FULL_IMAGE_NAME, "🐳")
-info("Platform", PLATFORM, "🧱")
-info("Build ARG", f"BRANCH={BUILD_BRANCH}", "🔧")
-info("Builder", BUILDER_NAME, "🏗️")
-print()
-
-# --------------------------------------------------
-# Build & push
-# --------------------------------------------------
-run([
-    "docker", "buildx", "build",
-    "--platform", PLATFORM,
-    "--no-cache",
-    "--builder", BUILDER_NAME,
-    "--build-arg", f"BRANCH={BUILD_BRANCH}",
-    "--tag", FULL_IMAGE_NAME,
-    "--attest", "type=provenance,mode=max",
-    "--push",
-    "."
-])
-
-print()
-print("✅ Image pushed successfully")
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as e:
+        error(f"Command failed: {' '.join(e.cmd)}")
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}⚠ Build cancelled{RESET}")
+        sys.exit(130)
+    except Exception as e:
+        error(str(e))
