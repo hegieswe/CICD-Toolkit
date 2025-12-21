@@ -9,15 +9,20 @@ from pathlib import Path
 # Config
 # =========================
 WORKSPACE = "loyaltoid"
+GIT_HOST = "bitbucket.org"
 
-# === Colors ===
+# =========================
+# Colors
+# =========================
 YELLOW = "\033[33m"
 GREEN = "\033[32m"
 RED = "\033[31m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-# === Icons ===
+# =========================
+# Icons
+# =========================
 INFO_ICON = "ℹ️ "
 WARN_ICON = "⚠️ "
 SUCCESS_ICON = "✅ "
@@ -25,71 +30,101 @@ ERROR_ICON = "❌ "
 REPO_ICON = "📦 "
 
 # =========================
-# Logging
+# Logging helpers
 # =========================
-def log_info(msg):
+def info(msg):
     print(f"{YELLOW}{INFO_ICON}{BOLD}{msg}{RESET}")
 
-def log_repo(msg):
+def repo(msg):
     print(f"{YELLOW}{REPO_ICON}{BOLD}{msg}{RESET}")
 
-def log_danger(msg):
+def warn(msg):
     print(f"{RED}{WARN_ICON}{BOLD}{msg}{RESET}")
 
-def log_success(msg):
+def success(msg):
     print(f"{GREEN}{SUCCESS_ICON}{BOLD}{msg}{RESET}")
 
-def log_error(msg):
+def error(msg):
     print(f"{RED}{ERROR_ICON}{BOLD}{msg}{RESET}")
 
 def fatal(msg, code=1):
-    log_error(msg)
+    error(msg)
     sys.exit(code)
 
 # =========================
 # Usage
 # =========================
 def usage():
-    log_error("Invalid usage")
+    error("Invalid usage")
     print("Usage:")
     print("  cl <repo> <branch|tag>")
     print("  cl <repo> <branch|tag> sl   # single branch clone")
     sys.exit(1)
 
 # =========================
-# Validation
+# Argument parsing
 # =========================
 args = sys.argv[1:]
 
 if len(args) < 2 or len(args) > 3:
     usage()
 
-REPO = args[0]
+REPO_NAME = args[0]
 REF = args[1]
 MODE = args[2] if len(args) == 3 else ""
 
-REPO_URL = f"https://bitbucket.org/{WORKSPACE}/{REPO}.git"
-REPO_DIR = Path(REPO)
+REPO_DIR = Path(REPO_NAME)
+
+# 🔑 SSH URL (INI KUNCI UTAMANYA)
+REPO_URL = f"git@{GIT_HOST}:{WORKSPACE}/{REPO_NAME}.git"
 
 # =========================
-# Cleanup
+# Pre-flight checks
+# =========================
+def check_git():
+    try:
+        subprocess.run(
+            ["git", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+    except Exception:
+        fatal("Git tidak ditemukan. Install git terlebih dahulu.")
+
+def check_ssh():
+    try:
+        subprocess.run(
+            ["ssh", "-T", f"git@{GIT_HOST}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        fatal("SSH tidak tersedia atau ssh-key belum terpasang.")
+
+check_git()
+check_ssh()
+
+# =========================
+# Cleanup existing repo
 # =========================
 if REPO_DIR.exists():
-    log_danger(f"Directory '{REPO}' already exists. Removing...")
+    warn(f"Directory '{REPO_NAME}' sudah ada. Menghapus...")
     try:
         shutil.rmtree(REPO_DIR)
     except Exception as e:
-        fatal(f"Gagal menghapus directory '{REPO}': {e}")
+        fatal(f"Gagal menghapus directory '{REPO_NAME}': {e}")
 
 # =========================
 # Info summary
 # =========================
-log_repo(f"Repository : {REPO}")
+repo(f"Repository : {REPO_NAME}")
+info(f"Ref        : {REF}")
 
 if MODE == "sl":
-    log_info(f"Branch/Tag : {REF} (Single branch)")
+    info("Mode       : Single branch clone")
 else:
-    log_info(f"Branch/Tag : {REF} (Full clone)")
+    info("Mode       : Full clone")
 
 # =========================
 # Clone logic
@@ -115,12 +150,10 @@ try:
             cwd=REPO_DIR,
             check=True
         )
-except FileNotFoundError:
-    fatal("Git tidak ditemukan. Pastikan git sudah terinstall.")
 except subprocess.CalledProcessError:
-    fatal("Git command gagal dijalankan.")
+    fatal("Git command gagal dijalankan. Periksa nama repo atau branch/tag.")
 
 # =========================
 # Done
 # =========================
-log_success(f"Clone completed successfully: {REPO}")
+success(f"Clone selesai: {REPO_NAME}")
