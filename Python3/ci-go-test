@@ -1,0 +1,907 @@
+#!/usr/bin/env python3
+"""
+CI Golang Test & Quality Gate
+
+A comprehensive testing and quality gate script for Golang projects.
+Supports Docker-based execution for lint and security gates.
+
+Usage:
+    ci-go-test                    # Run default gates (deps, build, test, vet)
+    ci-go-test --race             # Include race detector
+    ci-go-test --format           # Include code formatting check
+    ci-go-test --coverage         # Enforce coverage gate
+    ci-go-test --coverage=80      # Set custom coverage threshold
+    ci-go-test --lint             # Include golangci-lint
+    ci-go-test --security         # Include gosec security scan
+    ci-go-test --all              # Run all gates
+    ci-go-test --all --docker     # Run all gates using Docker
+    ci-go-test --all --skip-coverage  # Run all except coverage
+    ci-go-test --info             # Show config info only
+"""
+
+import subprocess
+import sys
+import argparse
+import re
+import json
+import time
+import os
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Optional
+
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
+DEFAULT_MIN_COVERAGE = 70.0
+CONFIG_FILE = "cicd/cicd.json"
+
+# Docker images for tools
+DOCKER_IMAGES = {
+    "golangci-lint": "golangci/golangci-lint:v2.7.2-alpine",
+    "gosec": "securego/gosec:latest",
+}
+
+# Exit codes (contract with CI/CD)
+EXIT_SUCCESS       = 0
+EXIT_GO_MISSING    = 2
+EXIT_DEPENDENCY    = 10
+EXIT_BUILD_FAIL    = 20
+EXIT_TEST_FAIL     = 30
+EXIT_STATIC_FAIL   = 40
+EXIT_COVERAGE_FAIL = 50
+EXIT_LINT_FAIL     = 60
+EXIT_FORMAT_FAIL   = 70
+EXIT_SECURITY_FAIL = 80
+
+# --------------------------------------------------
+# Styling
+# --------------------------------------------------
+class Style:
+    GREEN  = "\033[32m"
+    RED    = "\033[31m"
+    YELLOW = "\033[33m"
+    CYAN   = "\033[36m"
+    BLUE   = "\033[34m"
+    MAGENTA = "\033[35m"
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+
+class Icon:
+    CHECK     = "✔"
+    CROSS     = "✖"
+    WARN      = "⚠️ "
+    ARROW     = "▶"
+    DOT       = "•"
+    GEAR      = "⚙️ "
+    TEST      = "🧪"
+    BUILD     = "🏗️ "
+    SEARCH    = "🔍"
+    CHART     = "📊"
+    LOCK      = "🔒"
+    BROOM     = "🧹"
+    PACKAGE   = "📦"
+    CLOCK     = "⏱️ "
+    ROCKET    = "🚀"
+    DOCKER    = "🐳"
+
+class Box:
+    TL = "╭"
+    TR = "╮"
+    BL = "╰"
+    BR = "╯"
+    H  = "─"
+    V  = "│"
+
+# --------------------------------------------------
+# Data Classes
+# --------------------------------------------------
+@dataclass
+class GateResult:
+    name: str
+    passed: bool
+    duration: float
+    message: str = ""
+
+# --------------------------------------------------
+# Visual Helpers
+# --------------------------------------------------
+class InfoBox:
+    """
+    Dynamic width info box that ensures borders are longer than content.
+    Usage:
+        box = InfoBox("Title")
+        box.add("Label", "Value", icon)
+        box.print()
+    """
+    PADDING = 8  # Extra padding beyond longest content
+    MIN_WIDTH = 60
+    PREFIX_LEN = 18  # " {icon} {label:<12}: "
+    
+    def __init__(self, title: str):
+        self.title = title
+        self.items: list[tuple[str, str, str]] = []
+    
+    def add(self, label: str, value: str, icon: str = Icon.DOT) -> "InfoBox":
+        """Add an info item."""
+        self.items.append((label, value, icon))
+        return self
+    
+    def _calc_width(self) -> int:
+        """Calculate box width based on content."""
+        content_lens = [len(self.title)]
+        for label, value, _ in self.items:
+            content_lens.append(self.PREFIX_LEN + len(value))
+        
+        width = max(content_lens) + self.PADDING
+        return max(width, self.MIN_WIDTH)
+    
+    def print(self) -> None:
+        """Print the info box."""
+        width = self._calc_width()
+        remaining = width - len(self.title) - 3
+        
+        print()
+        print(f"{Style.DIM}{Box.TL}{Box.H} {Style.RESET}{Style.BOLD}{self.title}{Style.RESET}{Style.DIM} {Box.H * remaining}{Box.TR}{Style.RESET}")
+        
+        for label, value, icon in self.items:
+            print(f"{Style.DIM}{Box.V}{Style.RESET} {icon} {label:<12}: {Style.BOLD}{value}{Style.RESET}")
+        
+        print(f"{Style.DIM}{Box.BL}{Box.H * width}{Box.BR}{Style.RESET}")
+
+
+def print_header(title: str, width: int = 60) -> None:
+    """Print a styled header box."""
+    remaining = width - len(title) - 3
+    print()
+    print(f"{Style.DIM}{Box.TL}{Box.H} {Style.RESET}{Style.BOLD}{title}{Style.RESET}{Style.DIM} {Box.H * remaining}{Box.TR}{Style.RESET}")
+
+def print_footer(width: int = 60) -> None:
+    """Print footer line for box."""
+    print(f"{Style.DIM}{Box.BL}{Box.H * width}{Box.BR}{Style.RESET}")
+
+def gate_header(title: str, icon: str = "") -> None:
+    """Print gate section header."""
+    print()
+    print(f"{Style.YELLOW}{icon} {title}{Style.RESET}")
+
+def success(message: str) -> None:
+    """Print success message."""
+    print(f"{Style.GREEN}{Icon.CHECK} {message}{Style.RESET}")
+
+def fail(message: str, code: int) -> None:
+    """Print error message and exit."""
+    print(f"{Style.RED}{Icon.CROSS} {Style.BOLD}{message}{Style.RESET}")
+    sys.exit(code)
+
+def warn(message: str) -> None:
+    """Print warning message."""
+    print(f"{Style.YELLOW}{Icon.WARN}{message}{Style.RESET}")
+
+def run_cmd(message: str) -> None:
+    """Print command being run."""
+    print(f"{Style.CYAN}{Icon.ARROW} {message}{Style.RESET}")
+
+# --------------------------------------------------
+# Command Execution
+# --------------------------------------------------
+def run(cmd: list[str], fail_code: int, silent: bool = False, capture: bool = False, env: Optional[dict] = None) -> str:
+    """Execute command with error handling."""
+    if not silent:
+        run_cmd(' '.join(cmd))
+    
+    # Merge custom env with current environment
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    
+    try:
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
+            if result.returncode != 0:
+                if not silent:
+                    print(result.stderr)
+                fail(f"Command failed: {' '.join(cmd)}", fail_code)
+            return result.stdout
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
+            if result.returncode != 0:
+                print(result.stdout)
+                print(result.stderr)
+                fail(f"Command failed: {' '.join(cmd)}", fail_code)
+            return result.stdout
+    except FileNotFoundError:
+        fail(f"Command not found: {cmd[0]}", fail_code)
+    except subprocess.CalledProcessError as e:
+        if not silent:
+            print(e.output)
+        fail(f"Command failed: {' '.join(cmd)}", fail_code)
+    
+    return ""
+
+def check_command(cmd: str) -> bool:
+    """Check if a command is available."""
+    try:
+        subprocess.run([cmd, "--version"], capture_output=True)
+        return True
+    except FileNotFoundError:
+        return False
+
+def check_cgo_available() -> bool:
+    """Check if CGO is available (requires C compiler like gcc)."""
+    # Check for common C compilers
+    for compiler in ["gcc", "clang", "cc"]:
+        if check_command(compiler):
+            return True
+    return False
+
+def check_has_tests() -> bool:
+    """Check if there are any Go test files in the project."""
+    try:
+        # Find *_test.go files
+        result = subprocess.run(
+            ["find", ".", "-name", "*_test.go", "-type", "f"],
+            capture_output=True,
+            text=True
+        )
+        return bool(result.stdout.strip())
+    except FileNotFoundError:
+        # Fallback for systems without find command
+        for path in Path(".").rglob("*_test.go"):
+            return True
+        return False
+
+def check_docker_available() -> bool:
+    """Check if Docker is available and running."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+def run_docker(image: str, cmd: list[str], fail_code: int, quiet: bool = False) -> tuple[bool, str]:
+    """
+    Run command in Docker container with current directory mounted.
+    
+    Returns:
+        tuple: (success: bool, output: str)
+    """
+    cwd = os.getcwd()
+    docker_cmd = [
+        "docker", "run", "-t", "--rm",
+        "-v", f"{cwd}:/app",
+        "-w", "/app",
+        image
+    ] + cmd
+    
+    if not quiet:
+        run_cmd(f"docker run {image} {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(
+            docker_cmd,
+            capture_output=True,
+            text=True
+        )
+        
+        output = result.stdout + result.stderr
+        return (result.returncode == 0, output)
+    except FileNotFoundError:
+        return (False, "Docker not found")
+    except Exception as e:
+        return (False, str(e))
+
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
+def load_config() -> dict:
+    """Load configuration from cicd.json if available."""
+    config_path = Path(CONFIG_FILE)
+    if config_path.exists():
+        try:
+            with config_path.open() as f:
+                config = json.load(f)
+                return config.get("golang", {})
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+def get_coverage_threshold(args, config: dict) -> float:
+    """Determine coverage threshold from args or config."""
+    if args.coverage_threshold is not None:
+        return args.coverage_threshold
+    return config.get("min_coverage", DEFAULT_MIN_COVERAGE)
+
+# --------------------------------------------------
+# Quality Gates
+# --------------------------------------------------
+def gate_check_go() -> GateResult:
+    """Verify Go is installed and show version."""
+    start = time.time()
+    try:
+        result = subprocess.run(["go", "version"], capture_output=True, text=True)
+        if result.returncode == 0:
+            version = result.stdout.strip()
+            return GateResult("Go Version", True, time.time() - start, version)
+        return GateResult("Go Version", False, time.time() - start, "Go not found")
+    except FileNotFoundError:
+        return GateResult("Go Version", False, time.time() - start, "Go not installed")
+
+def gate_dependency() -> GateResult:
+    """Check dependency hygiene with go mod tidy."""
+    start = time.time()
+    gate_header("Dependency hygiene", Icon.PACKAGE)
+    
+    # Run go mod tidy
+    run(["go", "mod", "tidy"], EXIT_DEPENDENCY, silent=True)
+    
+    # Check for changes
+    diff = subprocess.run(
+        ["git", "diff", "--exit-code", "go.mod", "go.sum"],
+        capture_output=True
+    )
+    
+    if diff.returncode != 0:
+        print(diff.stdout.decode())
+        return GateResult("Dependencies", False, time.time() - start, "go.mod/go.sum changed after tidy")
+    
+    success("Dependencies clean")
+    return GateResult("Dependencies", True, time.time() - start)
+
+def gate_format() -> GateResult:
+    """Check code formatting with gofmt."""
+    start = time.time()
+    gate_header("Code formatting (gofmt)", Icon.BROOM)
+    
+    try:
+        # Get list of unformatted files
+        result = subprocess.run(
+            ["gofmt", "-l", "."],
+            capture_output=True,
+            text=True
+        )
+        
+        unformatted = result.stdout.strip()
+        if not unformatted:
+            success("All files formatted correctly")
+            return GateResult("Format", True, time.time() - start)
+        
+        files = unformatted.split('\n')
+        file_count = len(files)
+        
+        print(f"\n{Style.RED}{Style.BOLD}✖ Found {file_count} file(s) with formatting issues:{Style.RESET}\n")
+        
+        # Show diff for each file (limited to first 3 files to avoid too much output)
+        max_files_to_show = 3
+        for i, filepath in enumerate(files[:max_files_to_show]):
+            print(f"{Style.CYAN}{'─' * 60}{Style.RESET}")
+            print(f"{Style.BOLD}📄 {filepath}{Style.RESET}")
+            print(f"{Style.CYAN}{'─' * 60}{Style.RESET}")
+            
+            # Get diff for this file
+            diff_result = subprocess.run(
+                ["gofmt", "-d", filepath],
+                capture_output=True,
+                text=True
+            )
+            
+            if diff_result.stdout:
+                # Parse and colorize diff output
+                for line in diff_result.stdout.split('\n')[:30]:  # Limit lines
+                    if line.startswith('@@'):
+                        # Line range info (e.g., @@ -10,5 +10,6 @@)
+                        print(f"{Style.CYAN}{line}{Style.RESET}")
+                    elif line.startswith('-') and not line.startswith('---'):
+                        print(f"{Style.RED}{line}{Style.RESET}")
+                    elif line.startswith('+') and not line.startswith('+++'):
+                        print(f"{Style.GREEN}{line}{Style.RESET}")
+                    elif line.startswith('---') or line.startswith('+++'):
+                        print(f"{Style.DIM}{line}{Style.RESET}")
+                    else:
+                        print(f"{Style.DIM}{line}{Style.RESET}")
+                
+                # Check if diff was truncated
+                if len(diff_result.stdout.split('\n')) > 30:
+                    print(f"{Style.YELLOW}  ... (output truncated){Style.RESET}")
+            
+            print()
+        
+        # If more files, show count
+        if file_count > max_files_to_show:
+            remaining = file_count - max_files_to_show
+            print(f"{Style.YELLOW}  ... and {remaining} more file(s){Style.RESET}\n")
+        
+        # Show all affected files
+        print(f"{Style.BOLD}All unformatted files:{Style.RESET}")
+        for f in files:
+            print(f"  {Style.RED}•{Style.RESET} {f}")
+        
+        # Show how to fix
+        print(f"\n{Style.YELLOW}{'─' * 60}{Style.RESET}")
+        print(f"{Style.BOLD}💡 How to fix:{Style.RESET}")
+        print(f"   {Style.CYAN}# Fix all files automatically:{Style.RESET}")
+        print(f"   gofmt -w .")
+        print(f"\n   {Style.CYAN}# Or fix specific file:{Style.RESET}")
+        print(f"   gofmt -w <filename>")
+        print(f"\n   {Style.CYAN}# Preview changes without applying:{Style.RESET}")
+        print(f"   gofmt -d <filename>")
+        print(f"{Style.YELLOW}{'─' * 60}{Style.RESET}\n")
+        
+        return GateResult("Format", False, time.time() - start, f"{file_count} files need formatting")
+        
+    except FileNotFoundError:
+        warn("gofmt not found, skipping format check")
+        return GateResult("Format", True, time.time() - start, "Skipped")
+
+def gate_build() -> GateResult:
+    """Build the project."""
+    start = time.time()
+    gate_header("Build gate", Icon.BUILD)
+    
+    run(["go", "build", "./..."], EXIT_BUILD_FAIL)
+    success("Build passed")
+    return GateResult("Build", True, time.time() - start)
+
+def gate_test(race: bool = False) -> GateResult:
+    """Run unit tests."""
+    start = time.time()
+    gate_header(f"Unit tests {'(with race detector)' if race else ''}", Icon.TEST)
+    
+    cmd = ["go", "test", "-v", "./..."]
+    env = None
+    
+    if race:
+        # Race detector requires CGO
+        if not check_cgo_available():
+            warn("Race detector requires a C compiler (gcc/clang) for CGO")
+            warn("Install with: sudo apt install build-essential")
+            warn("Running tests without race detector...")
+            race = False
+        else:
+            cmd.insert(2, "-race")
+            env = {"CGO_ENABLED": "1"}
+            print(f"{Style.DIM}  (CGO_ENABLED=1 for race detector){Style.RESET}")
+    
+    run(cmd, EXIT_TEST_FAIL, env=env)
+    success("Tests passed")
+    return GateResult("Tests", True, time.time() - start, "with race" if race else "")
+
+def gate_static() -> GateResult:
+    """Run static analysis with go vet."""
+    start = time.time()
+    gate_header("Static analysis (go vet)", Icon.SEARCH)
+    
+    run(["go", "vet", "./..."], EXIT_STATIC_FAIL)
+    success("Static analysis clean")
+    return GateResult("Static (vet)", True, time.time() - start)
+
+def gate_lint(use_docker: bool = False) -> GateResult:
+    """Run golangci-lint (local or Docker).
+    
+    Priority:
+    1. If use_docker=True and Docker available -> use Docker
+    2. If golangci-lint installed locally -> use local
+    3. If Docker available -> use Docker as fallback
+    4. Skip with warning
+    """
+    start = time.time()
+    gate_header("Linting (golangci-lint)", Icon.SEARCH)
+    
+    has_local = check_command("golangci-lint")
+    has_docker = check_docker_available()
+    
+    # Force Docker mode
+    if use_docker and has_docker:
+        print(f"{Style.DIM}  {Icon.DOCKER} Using Docker: {DOCKER_IMAGES['golangci-lint']}{Style.RESET}")
+        ok, output = run_docker(
+            DOCKER_IMAGES["golangci-lint"],
+            ["golangci-lint", "run", "--timeout", "3m", "./..."],
+            EXIT_LINT_FAIL
+        )
+        if not ok:
+            print(output)
+            return GateResult("Lint", False, time.time() - start, "Lint issues (via Docker)")
+        success("Lint passed (Docker)")
+        return GateResult("Lint", True, time.time() - start, "via Docker")
+    
+    # Use local if available
+    if has_local:
+        run(["golangci-lint", "run", "./..."], EXIT_LINT_FAIL)
+        success("Lint passed")
+        return GateResult("Lint", True, time.time() - start)
+    
+    # Fallback to Docker
+    if has_docker:
+        print(f"{Style.DIM}  {Icon.DOCKER} Fallback to Docker: {DOCKER_IMAGES['golangci-lint']}{Style.RESET}")
+        ok, output = run_docker(
+            DOCKER_IMAGES["golangci-lint"],
+            ["golangci-lint", "run", "--timeout", "3m", "./..."],
+            EXIT_LINT_FAIL
+        )
+        if not ok:
+            print(output)
+            return GateResult("Lint", False, time.time() - start, "Lint issues (via Docker)")
+        success("Lint passed (Docker)")
+        return GateResult("Lint", True, time.time() - start, "via Docker")
+    
+    # Neither available
+    warn("golangci-lint not found locally")
+    warn("Docker not available for fallback")
+    warn("Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest")
+    return GateResult("Lint", True, time.time() - start, "Skipped (not installed)")
+
+def gate_security(use_docker: bool = False) -> GateResult:
+    """Run gosec security scan (local or Docker).
+    
+    Priority:
+    1. If use_docker=True and Docker available -> use Docker
+    2. If gosec installed locally -> use local
+    3. If Docker available -> use Docker as fallback
+    4. Skip with warning
+    """
+    start = time.time()
+    gate_header("Security scan (gosec)", Icon.LOCK)
+    
+    has_local = check_command("gosec")
+    has_docker = check_docker_available()
+    
+    # Force Docker mode
+    if use_docker and has_docker:
+        print(f"{Style.DIM}  {Icon.DOCKER} Using Docker: {DOCKER_IMAGES['gosec']}{Style.RESET}")
+        ok, output = run_docker(
+            DOCKER_IMAGES["gosec"],
+            ["-quiet", "./..."],
+            EXIT_SECURITY_FAIL
+        )
+        if not ok and "Issues" in output:
+            print(output)
+            return GateResult("Security", False, time.time() - start, "Issues found (Docker)")
+        success("No security issues found (Docker)")
+        return GateResult("Security", True, time.time() - start, "via Docker")
+    
+    # Use local if available
+    if has_local:
+        try:
+            result = subprocess.run(
+                ["gosec", "-quiet", "./..."],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                print(result.stdout)
+                print(result.stderr)
+                return GateResult("Security", False, time.time() - start, "Issues found")
+            
+            success("No security issues found")
+            return GateResult("Security", True, time.time() - start)
+        except FileNotFoundError:
+            pass
+    
+    # Fallback to Docker
+    if has_docker:
+        print(f"{Style.DIM}  {Icon.DOCKER} Fallback to Docker: {DOCKER_IMAGES['gosec']}{Style.RESET}")
+        ok, output = run_docker(
+            DOCKER_IMAGES["gosec"],
+            ["-quiet", "./..."],
+            EXIT_SECURITY_FAIL
+        )
+        if not ok and "Issues" in output:
+            print(output)
+            return GateResult("Security", False, time.time() - start, "Issues found (Docker)")
+        success("No security issues found (Docker)")
+        return GateResult("Security", True, time.time() - start, "via Docker")
+    
+    # Neither available
+    warn("gosec not found locally")
+    warn("Docker not available for fallback")
+    warn("Install: go install github.com/securego/gosec/v2/cmd/gosec@latest")
+    return GateResult("Security", True, time.time() - start, "Skipped (not installed)")
+
+def gate_coverage(threshold: float) -> GateResult:
+    """Run tests with coverage and enforce threshold."""
+    start = time.time()
+    gate_header(f"Coverage gate (min: {threshold:.1f}%)", Icon.CHART)
+    
+    # Check if there are any test files first
+    if not check_has_tests():
+        warn("No test files (*_test.go) found in project")
+        warn("Coverage gate skipped - add tests to enable coverage checking")
+        return GateResult("Coverage", True, time.time() - start, "Skipped (no tests)")
+    
+    # Run tests with coverage
+    run_cmd("go test ./... -coverprofile=coverage.out -covermode=atomic")
+    result = subprocess.run(
+        ["go", "test", "./...", "-coverprofile=coverage.out", "-covermode=atomic"],
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        print(result.stdout)
+        print(result.stderr)
+        return GateResult("Coverage", False, time.time() - start, "Tests failed")
+    
+    # Check if coverage.out was created and has content
+    coverage_file = Path("coverage.out")
+    if not coverage_file.exists() or coverage_file.stat().st_size == 0:
+        warn("No coverage data generated")
+        return GateResult("Coverage", True, time.time() - start, "No coverage data")
+    
+    # Get coverage percentage
+    cover_result = subprocess.run(
+        ["go", "tool", "cover", "-func=coverage.out"],
+        capture_output=True,
+        text=True
+    )
+    
+    # Parse total coverage
+    match = re.search(r"total:\s+\(statements\)\s+([\d.]+)%", cover_result.stdout)
+    if not match:
+        # No statements to cover (empty or no testable code)
+        warn("No statements to cover - project may have no testable code")
+        return GateResult("Coverage", True, time.time() - start, "No statements")
+    
+    coverage = float(match.group(1))
+    
+    # Display coverage with color coding
+    if coverage >= threshold:
+        color = Style.GREEN
+    elif coverage >= threshold * 0.8:
+        color = Style.YELLOW
+    else:
+        color = Style.RED
+    
+    print(f"  Coverage: {color}{Style.BOLD}{coverage:.2f}%{Style.RESET} (threshold: {threshold:.1f}%)")
+    
+    if coverage < threshold:
+        # Show helpful message for low coverage
+        print(f"\n{Style.YELLOW}💡 How to improve coverage:{Style.RESET}")
+        print(f"   {Style.CYAN}# View detailed coverage report:{Style.RESET}")
+        print(f"   go tool cover -html=coverage.out -o coverage.html")
+        print(f"\n   {Style.CYAN}# View function-level coverage:{Style.RESET}")
+        print(f"   go tool cover -func=coverage.out")
+        print()
+        return GateResult("Coverage", False, time.time() - start, f"{coverage:.2f}% < {threshold:.1f}%")
+    
+    success(f"Coverage gate passed ({coverage:.2f}%)")
+    return GateResult("Coverage", True, time.time() - start, f"{coverage:.2f}%")
+
+# --------------------------------------------------
+# Summary
+# --------------------------------------------------
+def print_summary(results: list[GateResult], total_time: float) -> None:
+    """Print summary table of all gate results."""
+    # Calculate dynamic width based on content
+    PADDING = 8
+    MIN_WIDTH = 65
+    
+    # Calculate based on longest note/message
+    max_note_len = max(len(r.message[:25]) for r in results) if results else 0
+    table_content_width = 20 + 10 + 12 + max_note_len + 4  # gate + status + duration + notes + spaces
+    width = max(table_content_width + PADDING, MIN_WIDTH)
+    
+    title = "Quality Gate Summary"
+    remaining = width - len(title) - 3
+    
+    print()
+    print(f"{Style.DIM}{Box.TL}{Box.H} {Style.RESET}{Style.BOLD}{title}{Style.RESET}{Style.DIM} {Box.H * remaining}{Box.TR}{Style.RESET}")
+    
+    # Table header
+    print(f"{Style.DIM}{Box.V}{Style.RESET} {'Gate':<20} {'Status':<10} {'Duration':<12} {'Notes'}")
+    print(f"{Style.DIM}{Box.V}{Style.RESET} {'-' * 20} {'-' * 10} {'-' * 12} {'-' * 20}")
+    
+    # Results
+    all_passed = True
+    for r in results:
+        status = f"{Style.GREEN}{Icon.CHECK} Pass{Style.RESET}" if r.passed else f"{Style.RED}{Icon.CROSS} Fail{Style.RESET}"
+        duration = f"{r.duration:.2f}s"
+        note = r.message[:25] if r.message else ""
+        print(f"{Style.DIM}{Box.V}{Style.RESET} {r.name:<20} {status:<19} {duration:<12} {Style.DIM}{note}{Style.RESET}")
+        if not r.passed:
+            all_passed = False
+    
+    print(f"{Style.DIM}{Box.BL}{Box.H * width}{Box.BR}{Style.RESET}")
+    
+    # Final status
+    print()
+    if all_passed:
+        print(f"{Style.GREEN}{Icon.ROCKET} {Style.BOLD}ALL QUALITY GATES PASSED{Style.RESET}")
+    else:
+        print(f"{Style.RED}{Icon.CROSS} {Style.BOLD}QUALITY GATES FAILED{Style.RESET}")
+    
+    print(f"{Style.DIM}{Icon.CLOCK} Total time: {total_time:.2f}s{Style.RESET}")
+    print()
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="CI Golang Test & Quality Gate",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  ci-go-test                    Run default gates (deps, build, test, vet)
+  ci-go-test --race             Include race detector in tests
+  ci-go-test --coverage         Enable coverage gate with default threshold
+  ci-go-test --coverage=80      Set custom coverage threshold (80%)
+  ci-go-test --lint             Include golangci-lint
+  ci-go-test --security         Include gosec security scan
+  ci-go-test --all              Run all available gates
+  ci-go-test --all --docker     Run all gates using Docker for lint/security
+  ci-go-test --info             Show configuration info only
+
+Docker Support:
+  Lint and Security gates can run via Docker if tools aren't installed locally.
+  By default, script auto-falls back to Docker when tools are missing.
+  Use --docker to force Docker mode, --no-docker to disable fallback.
+
+Exit Codes:
+  0   All gates passed
+  2   Go not installed
+  10  Dependency issues
+  20  Build failed
+  30  Tests failed
+  40  Static analysis failed
+  50  Coverage below threshold
+  60  Lint failed
+  70  Format check failed
+  80  Security scan failed
+"""
+    )
+    
+    parser.add_argument("--race", action="store_true", help="Enable race detector in tests")
+    parser.add_argument("--coverage", nargs="?", const=True, metavar="THRESHOLD", 
+                        help="Enable coverage gate (optionally specify threshold)")
+    parser.add_argument("--lint", action="store_true", help="Run golangci-lint")
+    parser.add_argument("--format", action="store_true", help="Check code formatting")
+    parser.add_argument("--security", action="store_true", help="Run gosec security scan")
+    parser.add_argument("--all", action="store_true", help="Run all quality gates")
+    parser.add_argument("--info", "-i", action="store_true", help="Show configuration info only")
+    parser.add_argument("--skip-deps", action="store_true", help="Skip dependency check")
+    parser.add_argument("--skip-coverage", action="store_true", help="Skip coverage gate when using --all")
+    parser.add_argument("--docker", action="store_true", help="Force Docker mode for lint/security")
+    parser.add_argument("--no-docker", action="store_true", help="Disable Docker fallback")
+    
+    args = parser.parse_args()
+    
+    # Parse coverage threshold
+    args.coverage_threshold = None
+    if args.coverage is not None:
+        if args.coverage is True:
+            args.coverage_enabled = True
+        else:
+            args.coverage_enabled = True
+            try:
+                args.coverage_threshold = float(args.coverage)
+            except ValueError:
+                fail(f"Invalid coverage threshold: {args.coverage}", 1)
+    else:
+        args.coverage_enabled = False
+    
+    # Load config
+    config = load_config()
+    coverage_threshold = get_coverage_threshold(args, config)
+    
+    # Enable all gates if --all
+    if args.all:
+        args.race = True
+        args.coverage_enabled = not args.skip_coverage
+        args.lint = True
+        args.format = True
+        args.security = True
+    
+    # Get Go version for info
+    go_result = gate_check_go()
+    
+    # Build gates list (in execution order)
+    gates = []
+    if not args.skip_deps:
+        gates.append("Dependencies")
+    if args.format:
+        gates.append("Format")
+    gates.append("Build")
+    gates.append(f"Tests{' (race)' if args.race else ''}")
+    gates.append("Static (vet)")
+    if args.lint:
+        gates.append("Lint")
+    if args.security:
+        gates.append("Security")
+    if args.coverage_enabled:
+        gates.append(f"Coverage ({coverage_threshold:.0f}%)")
+    if args.skip_coverage:
+        gates.append("Coverage (skipped)")
+    
+    # Determine Docker mode
+    docker_available = check_docker_available()
+    use_docker = args.docker or (docker_available and not args.no_docker)
+    
+    # Print info box with dynamic width
+    info_box = InfoBox("CI Golang Test & Quality Gate")
+    info_box.add("Go", go_result.message if go_result.passed else "Not found", Icon.GEAR)
+    info_box.add("Working Dir", str(Path.cwd()), Icon.DOT)
+    info_box.add("Gates", ", ".join(gates), Icon.DOT)
+    
+    # Docker status
+    if docker_available:
+        docker_mode = "Forced" if args.docker else "Auto-fallback"
+        if args.no_docker:
+            docker_mode = "Disabled"
+        info_box.add("Docker", f"Available ({docker_mode})", Icon.DOCKER)
+    else:
+        info_box.add("Docker", "Not available", Icon.DOCKER)
+    
+    info_box.print()
+    
+    if args.info:
+        print(f"\n{Style.YELLOW}ℹ️  Info only mode - no tests run{Style.RESET}\n")
+        return
+    
+    if not go_result.passed:
+        fail("Go not installed or not in PATH", EXIT_GO_MISSING)
+    
+    # Run gates
+    start_time = time.time()
+    results: list[GateResult] = [go_result]
+    
+    # Dependency gate
+    if not args.skip_deps:
+        results.append(gate_dependency())
+        if not results[-1].passed:
+            fail(results[-1].message, EXIT_DEPENDENCY)
+    
+    # Format gate
+    if args.format:
+        results.append(gate_format())
+        if not results[-1].passed:
+            fail(results[-1].message, EXIT_FORMAT_FAIL)
+    
+    # Build gate
+    results.append(gate_build())
+    if not results[-1].passed:
+        fail(results[-1].message, EXIT_BUILD_FAIL)
+    
+    # Test gate
+    results.append(gate_test(args.race))
+    if not results[-1].passed:
+        fail(results[-1].message, EXIT_TEST_FAIL)
+    
+    # Static analysis gate
+    results.append(gate_static())
+    if not results[-1].passed:
+        fail(results[-1].message, EXIT_STATIC_FAIL)
+    
+    # Lint gate
+    if args.lint:
+        results.append(gate_lint(use_docker=args.docker))
+        if not results[-1].passed:
+            fail(results[-1].message, EXIT_LINT_FAIL)
+    
+    # Security gate
+    if args.security:
+        results.append(gate_security(use_docker=args.docker))
+        if not results[-1].passed:
+            fail(results[-1].message, EXIT_SECURITY_FAIL)
+    
+    # Coverage gate
+    if args.coverage_enabled:
+        results.append(gate_coverage(coverage_threshold))
+        if not results[-1].passed:
+            fail(results[-1].message, EXIT_COVERAGE_FAIL)
+    
+    # Print summary
+    total_time = time.time() - start_time
+    print_summary(results, total_time)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{Style.YELLOW}{Icon.WARN}Cancelled{Style.RESET}")
+        sys.exit(130)
