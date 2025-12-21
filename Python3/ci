@@ -4,7 +4,7 @@ CI Script - Docker Build & Push dengan output JSON untuk CD pipeline.
 
 Usage:
     ci              # Build dan push image
-    ci --dry-run    # Tampilkan info tanpa build
+    ci --info       # Tampilkan build info saja (alias: -i, --dry-run, -n)
 """
 import json
 import subprocess
@@ -25,6 +25,15 @@ RED = "\033[31m"
 CYAN = "\033[36m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+DIM = "\033[2m"
+
+# Box Drawing Characters (Rounded)
+class Box:
+    TL = "╭"  # Top Left
+    TR = "╮"  # Top Right
+    BL = "╰"  # Bottom Left
+    BR = "╯"  # Bottom Right
+    H  = "─"  # Horizontal
 
 
 # --------------------------------------------------
@@ -32,7 +41,7 @@ BOLD = "\033[1m"
 # --------------------------------------------------
 def info(label: str, value: str, icon: str = "•") -> None:
     """Print formatted info line."""
-    print(f"{CYAN}{icon} {label:<12}{RESET}: {BOLD}{value}{RESET}")
+    print(f" {icon} {label:<10}: {BOLD}{value}{RESET}")
 
 
 def error(message: str) -> None:
@@ -112,8 +121,8 @@ def load_config(config_path: Path) -> dict:
 # Main
 # --------------------------------------------------
 def main() -> None:
-    # Parse args
-    dry_run = "--dry-run" in sys.argv or "-n" in sys.argv
+    # Parse args - info mode: just show build info without building
+    info_only = any(arg in sys.argv for arg in ["--dry-run", "-n", "--info", "-i"])
     
     # Paths
     repo_dir = Path.cwd()
@@ -128,18 +137,28 @@ def main() -> None:
     image_tag, branch = get_git_info()
     full_image = f"{DOCKER_ORG}/{image_name}:{image_tag}"
     
-    # Print build info
+    # Print build info with dynamic box width
+    PREFIX_LEN = 16  # Approx: " 🐳 Image      : "
+    PADDING = 6
+    
+    content_lens = [len(full_image), len(PLATFORM), len(branch), len(BUILDER_NAME)]
+    box_width = PREFIX_LEN + max(content_lens) + PADDING
+    box_width = max(box_width, 50)  # Minimum width
+    
+    title = "Build Info"
+    remaining = box_width - len(title) - 3  # -3 for "─ " before and " " after title
+    
     print()
-    print(f"{BOLD}╭─ Build Info ────────────────────────────────────────────────────╮{RESET}")
-    info("Image", full_image, "🐳")
-    info("Platform", PLATFORM, "🧱")
-    info("Branch", branch, "🌿")
-    info("Builder", BUILDER_NAME, "🏗️")
-    print(f"{BOLD}╰─────────────────────────────────────────────────────────────────╯{RESET}")
+    print(f"{DIM}{Box.TL}{Box.H} {RESET}{BOLD}{title}{RESET}{DIM} {Box.H * remaining}{Box.TR}{RESET}")
+    print(f" 🐳 Image      : {full_image}")
+    print(f" 🧱 Platform   : {PLATFORM}")
+    print(f" 🌿 Branch     : {branch}")
+    print(f" 🔧 Builder    : {BUILDER_NAME}")
+    print(f"{DIM}{Box.BL}{Box.H * box_width}{Box.BR}{RESET}")
     print()
     
-    if dry_run:
-        print(f"{YELLOW}⚠ Dry run mode - skipping build{RESET}")
+    if info_only:
+        print(f"{YELLOW}ℹ️  Info only mode - no build{RESET}")
         return
     
     # Ensure builder
