@@ -85,6 +85,9 @@ class Icon:
     CLOCK     = "⏱️ "
     ROCKET    = "🚀"
     DOCKER    = "🐳"
+    GO        = "🐹"
+    FOLDER    = "📁"
+    CLIPBOARD = "📋"
 
 class Box:
     TL = "╭"
@@ -824,9 +827,9 @@ Exit Codes:
     
     # Print info box with dynamic width
     info_box = InfoBox("CI Golang Test & Quality Gate")
-    info_box.add("Go", go_result.message if go_result.passed else "Not found", Icon.GEAR)
-    info_box.add("Working Dir", str(Path.cwd()), Icon.DOT)
-    info_box.add("Gates", ", ".join(gates), Icon.DOT)
+    info_box.add("Go", go_result.message if go_result.passed else "Not found", Icon.GO)
+    info_box.add("Working Dir", str(Path.cwd()), Icon.FOLDER)
+    info_box.add("Gates", ", ".join(gates), Icon.CLIPBOARD)
     
     # Docker status
     if docker_available:
