@@ -111,8 +111,11 @@ def load_config(config_path: Path) -> dict:
     with config_path.open() as f:
         config = json.load(f)
     
-    if not config.get("IMAGE"):
-        error("'IMAGE' tidak ditemukan di cicd.json")
+    # Validate required fields
+    required_fields = ["IMAGE", "PROJECT"]
+    missing = [f for f in required_fields if not config.get(f)]
+    if missing:
+        error(f"Field wajib tidak ditemukan di cicd.json: {', '.join(missing)}")
     
     return config
 
@@ -132,6 +135,8 @@ def main() -> None:
     # Load config
     config = load_config(config_file)
     image_name = config["IMAGE"]
+    project_name = config["PROJECT"]
+    port = config.get("PORT", "8080")  # Default port if not specified
     
     # Get git info
     image_tag, branch = get_git_info()
@@ -141,7 +146,7 @@ def main() -> None:
     PREFIX_LEN = 16  # Approx: " 🐳 Image      : "
     PADDING = 6
     
-    content_lens = [len(full_image), len(PLATFORM), len(branch), len(BUILDER_NAME)]
+    content_lens = [len(full_image), len(PLATFORM), len(branch), len(BUILDER_NAME), len(project_name)]
     box_width = PREFIX_LEN + max(content_lens) + PADDING
     box_width = max(box_width, 50)  # Minimum width
     
@@ -151,6 +156,8 @@ def main() -> None:
     print()
     print(f"{DIM}{Box.TL}{Box.H} {RESET}{BOLD}{title}{RESET}{DIM} {Box.H * remaining}{Box.TR}{RESET}")
     print(f" 🐳 Image      : {full_image}")
+    print(f" 📦 Project    : {project_name}")
+    print(f" 🔌 Port       : {port}")
     print(f" 🧱 Platform   : {PLATFORM}")
     print(f" 🌿 Branch     : {branch}")
     print(f" 🔧 Builder    : {BUILDER_NAME}")
@@ -170,6 +177,8 @@ def main() -> None:
         "--platform", PLATFORM,
         "--no-cache",
         "--builder", BUILDER_NAME,
+        "--build-arg", f"PROJECT={project_name}",
+        "--build-arg", f"PORT={port}",
         "--build-arg", f"BRANCH={branch}",
         "--tag", full_image,
         "--attest", "type=provenance,mode=max",

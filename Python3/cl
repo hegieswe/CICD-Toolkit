@@ -1,246 +1,349 @@
 #!/usr/bin/env python3
+"""
+cl - Fast Git Clone Tool
+Simple and fast repository cloning.
+
+Usage:
+    cl repo                  # Full clone (default branch)
+    cl repo branch           # Full clone + checkout branch/tag
+    cl repo branch -s        # Fast single-branch clone (recommended)
+"""
 
 import sys
 import os
 import shutil
 import subprocess
-import argparse
 import time
 import threading
+import re
 from pathlib import Path
 
-# =========================
-# Configuration & Constants
-# =========================
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
 DEFAULT_WORKSPACE = "loyaltoid"
 DEFAULT_GIT_HOST = "bitbucket.org"
+VERSION = "3.0.0"
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STYLING
+# ═══════════════════════════════════════════════════════════════════════════════
 class Style:
-    CYAN = "\033[36m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RED = "\033[31m"
-    YELLOW = "\033[33m"
-    RESET = "\033[0m"
+    CYAN    = "\033[96m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    RED     = "\033[91m"
+    MAGENTA = "\033[95m"
+    BLUE    = "\033[94m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RESET   = "\033[0m"
 
 class Icon:
-    WARN = "⚠️ "
-    SUCCESS = "✅ "
-    ERROR = "❌ "
-    REPO = "📦 "
-    LINK = "🔗 "
-    BRANCH = "🌿 "
-    MODE = "🧬 "
+    SUCCESS  = "✔"
+    ERROR    = "✖"
+    WARN     = "⚠"
+    REPO     = "📦"
+    LINK     = "🔗"
+    BRANCH   = "🌿"
+    MODE     = "⚡"
+    ROCKET   = "🚀"
+    CLOCK    = "⏱ "
+    SIZE     = "💾"
+    SPEED    = "🚀"
+    RECYCLE  = "♻️ "
 
-# Box Drawing Characters (Rounded)
 class Box:
-    TL = "╭" # Top Left
-    TR = "╮" # Top Right
-    BL = "╰" # Bottom Left
-    BR = "╯" # Bottom Right
-    H  = "─" # Horizontal
+    TL = "╭"
+    TR = "╮"
+    BL = "╰"
+    BR = "╯"
+    H  = "─"
+    V  = "│"
 
-# =========================
-# Visual Helpers
-# =========================
-def print_header(repo_name, repo_url, ref, is_single):
-    mode_str = "Single Branch" if is_single else "Full Clone"
-    
-    # Dynamic Width Calculation
-    # Content format: " {ICON} {LABEL} : {VALUE}"
-    # Prefix length (approx): Space(1) + Icon(2) + Space(1) + Label(~10) + Space(1) + Colon(1) + Space(1) = ~17-18 chars
-    # We'll calculate conservatively.
-    
-    # Approx lengths including padding/icons
-    # " 📦 Repository : " is 16 chars
-    PREFIX_LEN = 16 
-    PADDING = 6 # Extra buffer for aesthetics (longer than content)
-
-    content_lens = [
-        len(repo_name),
-        len(repo_url),
-        len(mode_str)
-    ]
-    if ref:
-        content_lens.append(len(ref))
-        
-    box_width = PREFIX_LEN + max(content_lens) + PADDING
-    
-    # Ensure a minimum width so it doesn't look too narrow
-    box_width = max(box_width, 50)
-
-    title = "Repo Info"
-    remaining = box_width - len(title) - 3  # -3 for "─ " before and " " after title
-    print(f"{Style.DIM}{Box.TL}{Box.H} {Style.RESET}{Style.BOLD}{title}{Style.RESET}{Style.DIM} {Box.H * remaining}{Box.TR}{Style.RESET}")
-    print(f" {Icon.REPO} Repository : {repo_name}")
-    print(f" {Icon.LINK} Source     : {repo_url}")
-    if ref:
-        print(f" {Icon.BRANCH} Ref        : {ref}")
-    
-    print(f" {Icon.MODE} Mode       : {mode_str}")
-
-    print(f"{Style.DIM}{Box.BL}{Box.H * box_width}{Box.BR}{Style.RESET}")
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPINNER
+# ═══════════════════════════════════════════════════════════════════════════════
 class Spinner:
-    """A simple spinner that clears itself when stopped."""
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    
     def __init__(self, message="Processing..."):
         self.message = message
         self.busy = False
-        self.delay = 0.1
+        self.delay = 0.08
         self._thread = None
-        self.frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def write(self, text):
-        sys.stdout.write(text)
-        sys.stdout.flush()
-
+        self._progress = ""
+        self._lock = threading.Lock()
+    
+    def update_progress(self, progress):
+        with self._lock:
+            self._progress = progress
+    
     def _spin(self):
         i = 0
         while self.busy:
-            self.write(f"\r{Style.CYAN}{self.frames[i % len(self.frames)]}{Style.RESET} {self.message}")
+            with self._lock:
+                progress = self._progress
+            line = f"\r{Style.CYAN}{self.FRAMES[i % 10]}{Style.RESET} {self.message}"
+            if progress:
+                line += f" {Style.DIM}{progress}{Style.RESET}"
+            sys.stdout.write(f"{line:<80}")
+            sys.stdout.flush()
             time.sleep(self.delay)
             i += 1
-
+    
     def start(self):
         self.busy = True
-        self._thread = threading.Thread(target=self._spin)
+        self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
-
-    def stop(self, success=True):
+    
+    def stop(self, success=True, message=None):
         self.busy = False
         if self._thread:
-            self._thread.join()
-        # Clear the line
-        sys.stdout.write(f"\r{' ' * (len(self.message) + 10)}\r")
+            self._thread.join(timeout=0.2)
+        icon = f"{Style.GREEN}{Icon.SUCCESS}" if success else f"{Style.RED}{Icon.ERROR}"
+        sys.stdout.write(f"\r{icon}{Style.RESET} {message or self.message:<75}\n")
         sys.stdout.flush()
 
-def warn(msg):
-    print(f"{Style.YELLOW}{Icon.WARN}{Style.BOLD}{msg}{Style.RESET}")
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+def format_size(b):
+    for u in ['B', 'KB', 'MB', 'GB']:
+        if b < 1024:
+            return f"{b:.1f} {u}"
+        b /= 1024
+    return f"{b:.1f} TB"
 
-def error(msg):
-    print(f"{Style.RED}{Icon.ERROR} {Style.BOLD}{msg}{Style.RESET}")
+def format_time(s):
+    if s < 1:
+        return f"{s * 1000:.0f}ms"
+    elif s < 60:
+        return f"{s:.1f}s"
+    return f"{int(s // 60)}m {s % 60:.0f}s"
 
-def fatal(msg, code=1):
-    error(msg)
-    sys.exit(code)
-
-# =========================
-# Git Operations
-# =========================
-def check_requirements(host):
-    """Check if git is available."""
+def get_size(path):
+    total = 0
     try:
-        subprocess.run(["git", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    except FileNotFoundError:
-        fatal("Git not found. Please install git.")
+        for e in os.scandir(path):
+            if e.is_file(follow_symlinks=False):
+                total += e.stat().st_size
+            elif e.is_dir(follow_symlinks=False):
+                total += get_size(e.path)
+    except (PermissionError, OSError):
+        pass
+    return total
 
-def get_repo_url(host, workspace, repo):
-    return f"git@{host}:{workspace}/{repo}.git"
+def fatal(msg):
+    print(f"  {Style.RED}{Icon.ERROR}{Style.RESET} {Style.BOLD}{msg}{Style.RESET}")
+    sys.exit(1)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description=f"{Style.BOLD}Clone repository from {DEFAULT_GIT_HOST} (or configured host){Style.RESET}",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    
-    parser.add_argument("repo", help="Repository name")
-    parser.add_argument("ref", nargs="?", help="Branch or Tag to checkout (optional)")
-    parser.add_argument("-s", "--single", action="store_true", help="Single branch clone (shallow if possible)")
-    parser.add_argument("-d", "--depth", type=int, help="Create a shallow clone with a history truncated to the specified number of commits")
-    parser.add_argument("-w", "--workspace", help="Override workspace (default: env CL_WORKSPACE or 'loyaltoid')", default=os.environ.get("CL_WORKSPACE", DEFAULT_WORKSPACE))
-    parser.add_argument("--host", help="Override git host (default: env CL_GIT_HOST or 'bitbucket.org')", default=os.environ.get("CL_GIT_HOST", DEFAULT_GIT_HOST))
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIT OPERATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+def clone_with_progress(cmd, spinner):
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    output = []
+    for line in iter(proc.stderr.readline, ''):
+        output.append(line)
+        if "Receiving objects:" in line:
+            m = re.search(r'(\d+)%', line)
+            if m:
+                spinner.update_progress(f"Receiving: {m.group(1)}%")
+        elif "Resolving deltas:" in line:
+            m = re.search(r'(\d+)%', line)
+            if m:
+                spinner.update_progress(f"Resolving: {m.group(1)}%")
+        elif "Cloning into" in line:
+            spinner.update_progress("Connecting...")
+    proc.wait()
+    return proc.returncode, ''.join(output)
 
-    args = parser.parse_args()
-
-    # Setup
-    repo_name = args.repo
-    ref = args.ref
-    repo_dir = Path(repo_name)
-    repo_url = get_repo_url(args.host, args.workspace, repo_name)
-
-    print_header(repo_name, repo_url, ref, args.single)
-    
-    # Pre-flight
-    check_requirements(args.host)
+def run_clone(repo, ref, single_branch, workspace, host):
+    repo_dir = Path(repo)
+    repo_url = f"git@{host}:{workspace}/{repo}.git"
     replaced = False
-
-    # Cleanup existing
+    
+    # Mode
+    mode_str = f"{Style.GREEN}Single Branch{Style.RESET} (depth: 1)" if single_branch else f"{Style.BLUE}Full Clone{Style.RESET}"
+    
+    # Build info lines for dynamic box width
+    info_lines = [
+        f"{Icon.REPO} Repository:  {repo}",
+        f"{Icon.LINK} Source:      {repo_url}",
+    ]
+    if ref:
+        info_lines.append(f"{Icon.BRANCH} Ref:         {ref}")
+    # Mode line (without ANSI for width calculation)
+    mode_plain = "Single Branch (depth: 1)" if single_branch else "Full Clone"
+    info_lines.append(f"{Icon.MODE} Mode:        {mode_plain}")
+    
+    # Calculate box width
+    max_len = max(len(line) for line in info_lines)
+    box_width = max_len + 4  # padding
+    box_width = max(box_width, 40)  # minimum
+    
+    # Print header box
+    title = "Repository Information"
+    title_line = f"{Box.TL}{Box.H}{title}{Box.H * (box_width - len(title) - 1)}{Box.TR}"
+    
+    print()
+    print(f"{Style.GREEN}{title_line}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.REPO} {Style.RED}Repository :{Style.RESET} {Style.GREEN}{repo}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.LINK} {Style.RED}Source     :{Style.RESET} {Style.GREEN}{repo_url}{Style.RESET}")
+    if ref:
+        print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.BRANCH} {Style.RED}Ref        :{Style.RESET} {Style.GREEN}{ref}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.MODE} {Style.RED}Mode       :{Style.RESET} {Style.GREEN}{mode_plain}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.BL}{Box.H * box_width}{Box.BR}{Style.RESET}")
+    print()
+    
+    # Remove existing (auto-overwrite)
     if repo_dir.exists():
-        spinner = Spinner(f"Removing existing '{repo_name}'...")
+        spinner = Spinner(f"Removing existing '{repo}'...")
         spinner.start()
         try:
             shutil.rmtree(repo_dir)
-            spinner.stop(success=True)
+            spinner.stop(success=True, message=f"Removed existing '{repo}'")
             replaced = True
         except Exception as e:
             spinner.stop(success=False)
-            fatal(f"Failed to remove directory: {e}")
-
-    # Operations
-    start_time = time.time()
+            fatal(f"Failed to remove: {e}")
     
-    git_cmd = ["git", "clone"]
+    # Build command
+    cmd = ["git", "clone", "--progress"]
+    if single_branch:
+        cmd.extend(["--single-branch", "--depth", "1"])
+        if ref:
+            cmd.extend(["--branch", ref])
+    cmd.extend([repo_url, str(repo_dir)])
     
-    if args.single:
-        git_cmd.append("--single-branch")
-
-    if args.depth:
-        git_cmd.extend(["--depth", str(args.depth)])
-
-    if ref and args.single:
-         git_cmd.extend(["--branch", ref])
-    
-    git_cmd.append(repo_url)
-
-    spinner_clone = Spinner(f"Cloning {repo_name}...")
-    spinner_clone.start()
+    # Clone
+    start = time.perf_counter()
+    spinner = Spinner(f"Cloning {repo}...")
+    spinner.start()
     
     try:
-        proc = subprocess.run(
-            git_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding='utf-8'
-        )
-        
-        if proc.returncode != 0:
-            spinner_clone.stop(success=False)
-            print(proc.stderr)
+        code, stderr = clone_with_progress(cmd, spinner)
+        if code != 0:
+            spinner.stop(success=False, message="Clone failed")
+            if stderr:
+                print(f"\n{Style.DIM}{stderr}{Style.RESET}")
             fatal("Git clone failed.")
-        else:
-            spinner_clone.stop(success=True)
-
-        if ref and not args.single:
-            spinner_checkout = Spinner(f"Checking out {ref}...")
-            spinner_checkout.start()
-            
-            subprocess.run(
-                ["git", "checkout", ref],
-                cwd=repo_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True
-            )
-            spinner_checkout.stop(success=True)
-            
-    except subprocess.CalledProcessError as e:
-        spinner_clone.stop(success=False)
-        fatal(f"Git Error: {e}")
+        spinner.stop(success=True, message=f"Cloned {repo}")
     except KeyboardInterrupt:
-        print()
-        fatal("Cancelled.", 0)
-
-    elapsed = time.time() - start_time
+        spinner.stop(success=False, message="Cancelled")
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        sys.exit(130)
     
-    # Output results
+    # Checkout (full clone only)
+    if ref and not single_branch:
+        spinner = Spinner(f"Checking out {ref}...")
+        spinner.start()
+        result = subprocess.run(["git", "checkout", ref], cwd=repo_dir, capture_output=True, text=True)
+        if result.returncode == 0:
+            spinner.stop(success=True, message=f"Checked out {ref}")
+        else:
+            spinner.stop(success=False, message=f"Failed to checkout {ref}")
+            if result.stderr:
+                print(f"  {Style.DIM}{result.stderr.strip()}{Style.RESET}")
+    
+    # Summary
+    elapsed = time.perf_counter() - start
+    size = get_size(repo_dir)
+    
+    print()
+    print(f"  {Icon.CLOCK}  Duration  : {Style.GREEN}{format_time(elapsed)}{Style.RESET}")
+    print(f"  {Icon.SIZE}  Size      : {Style.CYAN}{format_size(size)}{Style.RESET}")
+    print(f"  {Icon.SPEED}  Speed     : {Style.CYAN}{format_size(size / elapsed)}/s{Style.RESET}")
     if replaced:
-        print(f"{Icon.WARN}  Replaced existing directory")
+        print(f"  {Icon.RECYCLE}  Replaced  : {Style.YELLOW}Yes{Style.RESET}")
+    print()
+    print(f"  {Style.GREEN}{Icon.SUCCESS} Ready{Style.RESET} → {Style.DIM}cd {repo}{Style.RESET}")
+    print()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+def print_usage():
+    print(f"""
+{Style.CYAN}{Style.BOLD}cl{Style.RESET} - Fast Git Clone Tool {Style.DIM}v{VERSION}{Style.RESET}
+
+{Style.BOLD}Usage:{Style.RESET}
+    cl <repo>                     Full clone (default branch)
+    cl <repo> <branch/tag>        Full clone + checkout branch/tag  
+    cl <repo> <branch/tag> -s     Fast single-branch clone {Style.GREEN}(recommended){Style.RESET}
+
+{Style.BOLD}Options:{Style.RESET}
+    -s, --single     Single-branch mode (faster clone)
+    -w, --workspace  Override workspace (default: {DEFAULT_WORKSPACE})
+    --host           Override git host (default: {DEFAULT_GIT_HOST})
+    -h, --help       Show this help
+    -v, --version    Show version
+
+{Style.BOLD}Examples:{Style.RESET}
+    cl myrepo                     Clone repo with full history
+    cl myrepo main                Clone and checkout 'main' branch
+    cl myrepo v1.0.0 -s           Fast clone tag 'v1.0.0' only
+
+{Style.BOLD}Note:{Style.RESET}
+    If directory exists, it will be {Style.YELLOW}automatically replaced{Style.RESET}.
+""")
+
+def main():
+    args = sys.argv[1:]
     
-    print(f"{Icon.SUCCESS} Cloned successfully in {elapsed:.2f}s")
+    # Defaults
+    workspace = os.environ.get("CL_WORKSPACE", DEFAULT_WORKSPACE)
+    host = os.environ.get("CL_GIT_HOST", DEFAULT_GIT_HOST)
+    single_branch = False
+    repo = None
+    ref = None
+    
+    # Parse args manually for simplicity
+    positional = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ["-h", "--help"]:
+            print_usage()
+            sys.exit(0)
+        elif arg in ["-v", "--version"]:
+            print(f"cl {VERSION}")
+            sys.exit(0)
+        elif arg in ["-s", "--single"]:
+            single_branch = True
+        elif arg in ["-w", "--workspace"] and i + 1 < len(args):
+            i += 1
+            workspace = args[i]
+        elif arg == "--host" and i + 1 < len(args):
+            i += 1
+            host = args[i]
+        elif not arg.startswith("-"):
+            positional.append(arg)
+        else:
+            print(f"{Style.RED}Unknown option: {arg}{Style.RESET}")
+            sys.exit(1)
+        i += 1
+    
+    if len(positional) < 1:
+        print_usage()
+        sys.exit(1)
+    
+    repo = positional[0]
+    ref = positional[1] if len(positional) > 1 else None
+    
+    # Check git
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, timeout=5, check=True)
+    except Exception:
+        fatal("Git not found. Please install git.")
+    
+    run_clone(repo, ref, single_branch, workspace, host)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         print()
-        sys.exit(0)
+        sys.exit(130)
