@@ -1,128 +1,368 @@
 #!/usr/bin/env python3
+"""
+API Gateway Migration Tool - Optimized Version
+Converts monolithic apigateway.json into KrakenD-compatible partials and settings.
+"""
 
+import argparse
 import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STYLING & ICONS
+# ═══════════════════════════════════════════════════════════════════════════════
+CYAN    = "\033[96m"
+GREEN   = "\033[92m"
+YELLOW  = "\033[93m"
+RED     = "\033[91m"
+MAGENTA = "\033[95m"
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+RESET   = "\033[0m"
+
+ICON_SUCCESS  = "✔"
+ICON_ERROR    = "✖"
+ICON_ARROW    = "➜"
+ICON_INFO     = "ℹ"
+ICON_FILE     = "📄"
+ICON_FOLDER   = "📁"
+ICON_ROCKET   = "🚀"
+ICON_CLOCK    = "⏱"
+ICON_ENDPOINT = "🔗"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITY FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+def print_header():
+    """Print application header."""
+    print()
+    print(f"{CYAN}{BOLD}╔══════════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{CYAN}{BOLD}║{RESET}  {ICON_ROCKET} {MAGENTA}{BOLD}API Gateway Migration Tool{RESET}                              {CYAN}{BOLD}║{RESET}")
+    print(f"{CYAN}{BOLD}║{RESET}  {DIM}KrakenD Configuration Splitter - Optimized Edition{RESET}         {CYAN}{BOLD}║{RESET}")
+    print(f"{CYAN}{BOLD}╚══════════════════════════════════════════════════════════════╝{RESET}")
+    print()
+
+def print_section(title):
+    """Print section separator."""
+    print(f"\n{CYAN}{BOLD}{'─' * 60}{RESET}")
+    print(f"{CYAN}{BOLD}{ICON_ARROW}{RESET} {BOLD}{title}{RESET}")
+    print(f"{CYAN}{BOLD}{'─' * 60}{RESET}")
+
+def print_success(msg):
+    """Print success message."""
+    print(f"  {GREEN}{ICON_SUCCESS}{RESET} {msg}")
+
+def print_error(msg):
+    """Print error message."""
+    print(f"  {RED}{ICON_ERROR}{RESET} {msg}")
+
+def print_info(msg):
+    """Print info message."""
+    print(f"  {CYAN}{ICON_INFO}{RESET} {msg}")
+
+def print_file_created(filepath, size_bytes=None):
+    """Print file creation message."""
+    size_info = f" {DIM}({size_bytes:,} bytes){RESET}" if size_bytes else ""
+    print(f"  {GREEN}{ICON_SUCCESS}{RESET} {ICON_FILE} {filepath}{size_info}")
+
 def fatal(msg, code=1):
-    print(f"ERROR: {msg}")
+    """Print error and exit."""
+    print_error(msg)
     sys.exit(code)
 
-INPUT = Path("apigateway.json")
+def format_duration(seconds):
+    """Format duration in human-readable format."""
+    if seconds < 1:
+        return f"{seconds * 1000:.1f}ms"
+    return f"{seconds:.2f}s"
 
-PARTIAL_DIR = Path("config/partials")
-SETTINGS_DIR = Path("config/settings")
+# ═══════════════════════════════════════════════════════════════════════════════
+# CORE MIGRATION LOGIC
+# ═══════════════════════════════════════════════════════════════════════════════
+def write_partial_file(args):
+    """Write a single partial file (for parallel execution)."""
+    index, endpoint, partial_dir = args
+    filepath = partial_dir / str(index)
+    content = json.dumps(endpoint, indent=2)
+    filepath.write_text(content)
+    return index, len(content)
 
-# -------------------------------------------------
-# Validasi input file
-# -------------------------------------------------
-if not INPUT.exists():
-    fatal("File 'apigateway.json' tidak ditemukan. Jalankan perintah dari direktori yang benar.")
-
-# -------------------------------------------------
-# Prepare directory
-# -------------------------------------------------
-try:
-    PARTIAL_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-except Exception as e:
-    fatal(f"Gagal membuat direktori output: {e}")
-
-# -------------------------------------------------
-# Load JSON
-# -------------------------------------------------
-try:
-    with INPUT.open("r") as f:
-        data = json.load(f)
-except json.JSONDecodeError as e:
-    fatal(f"Format JSON tidak valid: {e}")
-except Exception as e:
-    fatal(f"Gagal membaca apigateway.json: {e}")
-
-# -------------------------------------------------
-# Validasi struktur minimal (aman untuk KrakenD)
-# -------------------------------------------------
-for key in ("endpoints", "extra_config"):
-    if key not in data:
-        fatal(f"Key '{key}' tidak ditemukan di apigateway.json")
-
-endpoints = data["endpoints"]
-
-JUMLAH = len(endpoints)
-ARRAY_COUNT = JUMLAH - 1
-
-print(f"JUMLAH : {JUMLAH}")
-
-# -------------------------------------------------
-# global_extra_config.tmpl
-# -------------------------------------------------
-try:
-    extra_config_raw = json.dumps(data["extra_config"], indent=2)
-    lines = extra_config_raw.splitlines()
-    content = "\n".join(lines[1:])
-    content = content[:-2]
-
-    with (PARTIAL_DIR / "global_extra_config.tmpl").open("w") as f:
-        f.write(content)
-except Exception as e:
-    fatal(f"Gagal membuat global_extra_config.tmpl: {e}")
-
-# -------------------------------------------------
-# service.json
-# -------------------------------------------------
-try:
-    service = {
-        "name": data.get("name"),
-        "port": data.get("port"),
-        "cache_ttl": data.get("cache_ttl"),
-        "timeout": data.get("timeout"),
+def migrate(input_file, output_base, parallel=True, quiet=False):
+    """
+    Main migration function.
+    
+    Args:
+        input_file: Path to apigateway.json
+        output_base: Base directory for output (will create config/partials and config/settings)
+        parallel: Use parallel writing for partials
+        quiet: Suppress detailed output
+    
+    Returns:
+        dict with migration statistics
+    """
+    start_time = time.perf_counter()
+    stats = {
+        "endpoints": 0,
+        "files_created": 0,
+        "total_bytes": 0,
+        "errors": []
     }
-
-    with (SETTINGS_DIR / "service.json").open("w") as f:
-        json.dump(service, f, indent=2)
-except Exception as e:
-    fatal(f"Gagal membuat service.json: {e}")
-
-# -------------------------------------------------
-# endpoint.json
-# -------------------------------------------------
-endpoint_file = SETTINGS_DIR / "endpoint.json"
-
-try:
-    with endpoint_file.open("w") as f:
-        f.write('{"mapping_group": [\n')
-
-        for i in range(0, ARRAY_COUNT + 1):
-            INDEX = i + 1
-            ep = endpoints[i]
-
+    
+    input_path = Path(input_file)
+    partial_dir = Path(output_base) / "config" / "partials"
+    settings_dir = Path(output_base) / "config" / "settings"
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Validate Input
+    # ─────────────────────────────────────────────────────────────────────────
+    if not quiet:
+        print_section("Input Validation")
+    
+    if not input_path.exists():
+        fatal(f"File '{input_path}' not found. Run from the correct directory.")
+    
+    if not quiet:
+        file_size = input_path.stat().st_size
+        print_success(f"Found {input_path.name} ({file_size:,} bytes)")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Create Directories
+    # ─────────────────────────────────────────────────────────────────────────
+    if not quiet:
+        print_section("Directory Setup")
+    
+    try:
+        partial_dir.mkdir(parents=True, exist_ok=True)
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        if not quiet:
+            print_success(f"{ICON_FOLDER} Created: {partial_dir}")
+            print_success(f"{ICON_FOLDER} Created: {settings_dir}")
+    except Exception as e:
+        fatal(f"Failed to create output directories: {e}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Load & Validate JSON
+    # ─────────────────────────────────────────────────────────────────────────
+    if not quiet:
+        print_section("Loading Configuration")
+    
+    try:
+        data = json.loads(input_path.read_text())
+        if not quiet:
+            print_success("JSON parsed successfully")
+    except json.JSONDecodeError as e:
+        fatal(f"Invalid JSON format: {e}")
+    except Exception as e:
+        fatal(f"Failed to read {input_path}: {e}")
+    
+    # Validate required keys
+    required_keys = ("endpoints", "extra_config")
+    for key in required_keys:
+        if key not in data:
+            fatal(f"Missing required key: '{key}'")
+    
+    endpoints = data["endpoints"]
+    stats["endpoints"] = len(endpoints)
+    
+    if not quiet:
+        print_success(f"Found {len(endpoints)} endpoints to migrate")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Generate global_extra_config.tmpl
+    # ─────────────────────────────────────────────────────────────────────────
+    if not quiet:
+        print_section("Generating Templates")
+    
+    try:
+        extra_config_raw = json.dumps(data["extra_config"], indent=2)
+        lines = extra_config_raw.splitlines()
+        # Remove outer braces and trailing comma
+        content = "\n".join(lines[1:-1])
+        
+        tmpl_path = partial_dir / "global_extra_config.tmpl"
+        tmpl_path.write_text(content)
+        
+        stats["files_created"] += 1
+        stats["total_bytes"] += len(content)
+        
+        if not quiet:
+            print_file_created("global_extra_config.tmpl", len(content))
+    except Exception as e:
+        fatal(f"Failed to create global_extra_config.tmpl: {e}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Generate service.json
+    # ─────────────────────────────────────────────────────────────────────────
+    if not quiet:
+        print_section("Generating Settings")
+    
+    try:
+        service = {
+            "name": data.get("name"),
+            "port": data.get("port"),
+            "cache_ttl": data.get("cache_ttl"),
+            "timeout": data.get("timeout"),
+        }
+        
+        service_content = json.dumps(service, indent=2)
+        service_path = settings_dir / "service.json"
+        service_path.write_text(service_content)
+        
+        stats["files_created"] += 1
+        stats["total_bytes"] += len(service_content)
+        
+        if not quiet:
+            print_file_created("service.json", len(service_content))
+    except Exception as e:
+        fatal(f"Failed to create service.json: {e}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Generate endpoint.json and partials (OPTIMIZED)
+    # ─────────────────────────────────────────────────────────────────────────
+    if not quiet:
+        print_section("Processing Endpoints")
+    
+    try:
+        # Pre-build mapping list (in memory first)
+        mapping_list = []
+        partial_tasks = []
+        
+        for i, ep in enumerate(endpoints, start=1):
             endpoint_path = ep.get("endpoint", "")
-            name_endpoint = endpoint_path[1:] if endpoint_path.startswith("/") else endpoint_path
-
-            print(f" {INDEX} => ENDPOINT: {name_endpoint}")
-
-            # partial endpoint
-            with (PARTIAL_DIR / str(INDEX)).open("w") as pf:
-                json.dump(ep, pf, indent=2)
-
-            obj = {
-                "id": str(INDEX),
+            name_endpoint = endpoint_path.lstrip("/")
+            
+            # Build mapping entry
+            try:
+                host = ep["backend"][0]["host"][0]
+            except (KeyError, IndexError):
+                host = "unknown"
+            
+            mapping_entry = {
+                "id": str(i),
                 "endpoint": ep.get("endpoint"),
                 "method": ep.get("method"),
-                "host": ep["backend"][0]["host"][0],
+                "host": host,
             }
+            mapping_list.append(mapping_entry)
+            
+            # Queue partial file for writing
+            partial_tasks.append((i, ep, partial_dir))
+            
+            if not quiet:
+                method = ep.get("method", "GET")
+                print(f"  {ICON_ENDPOINT} {YELLOW}[{i:03d}]{RESET} {CYAN}{method:6}{RESET} {name_endpoint}")
+        
+        # Write partials (parallel or sequential)
+        if parallel and len(partial_tasks) > 1:
+            if not quiet:
+                print_info(f"Writing {len(partial_tasks)} partials in parallel...")
+            
+            with ThreadPoolExecutor(max_workers=min(8, len(partial_tasks))) as executor:
+                futures = {executor.submit(write_partial_file, task): task[0] for task in partial_tasks}
+                for future in as_completed(futures):
+                    idx, size = future.result()
+                    stats["files_created"] += 1
+                    stats["total_bytes"] += size
+        else:
+            for task in partial_tasks:
+                idx, size = write_partial_file(task)
+                stats["files_created"] += 1
+                stats["total_bytes"] += size
+        
+        # Write endpoint.json (single write, no seek/truncate)
+        endpoint_data = {"mapping_group": mapping_list}
+        endpoint_content = json.dumps(endpoint_data, indent=2)
+        endpoint_path = settings_dir / "endpoint.json"
+        endpoint_path.write_text(endpoint_content)
+        
+        stats["files_created"] += 1
+        stats["total_bytes"] += len(endpoint_content)
+        
+        if not quiet:
+            print()
+            print_file_created("endpoint.json", len(endpoint_content))
+        
+    except KeyError as e:
+        fatal(f"Invalid endpoint structure (missing key): {e}")
+    except Exception as e:
+        fatal(f"Failed to process endpoints: {e}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Summary
+    # ─────────────────────────────────────────────────────────────────────────
+    elapsed = time.perf_counter() - start_time
+    stats["duration"] = elapsed
+    
+    if not quiet:
+        print_section("Migration Complete")
+        print()
+        print(f"  {ICON_CLOCK} {BOLD}Duration:{RESET}      {GREEN}{format_duration(elapsed)}{RESET}")
+        print(f"  {ICON_ENDPOINT} {BOLD}Endpoints:{RESET}     {CYAN}{stats['endpoints']}{RESET}")
+        print(f"  {ICON_FILE} {BOLD}Files Created:{RESET} {CYAN}{stats['files_created']}{RESET}")
+        print(f"  {ICON_FOLDER} {BOLD}Total Size:{RESET}    {CYAN}{stats['total_bytes']:,} bytes{RESET}")
+        print()
+        print(f"  {GREEN}{ICON_SUCCESS} All files written to:{RESET}")
+        print(f"    {DIM}├─{RESET} {partial_dir}")
+        print(f"    {DIM}└─{RESET} {settings_dir}")
+        print()
+    
+    return stats
 
-            f.write(json.dumps(obj))
-            f.write(",\n")
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════════
+def main():
+    parser = argparse.ArgumentParser(
+        description="Migrate monolithic apigateway.json to KrakenD partials and settings.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                           # Use defaults (apigateway.json in current dir)
+  %(prog)s -i custom.json            # Use custom input file
+  %(prog)s -o ./output               # Output to custom directory
+  %(prog)s --no-parallel             # Disable parallel writing
+  %(prog)s -q                        # Quiet mode (minimal output)
+        """
+    )
+    
+    parser.add_argument(
+        "-i", "--input",
+        default="apigateway.json",
+        help="Input JSON file (default: apigateway.json)"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default=".",
+        help="Output base directory (default: current directory)"
+    )
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable parallel file writing"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Quiet mode - minimal output"
+    )
+    
+    args = parser.parse_args()
+    
+    if not args.quiet:
+        print_header()
+    
+    stats = migrate(
+        input_file=args.input,
+        output_base=args.output,
+        parallel=not args.no_parallel,
+        quiet=args.quiet
+    )
+    
+    # Exit with success
+    sys.exit(0)
 
-            print("-------------------------------")
-
-        # truncate ",\n"
-        f.seek(f.tell() - 2)
-        f.truncate()
-        f.write("\n]}")
-
-except KeyError as e:
-    fatal(f"Struktur endpoint tidak sesuai (key hilang): {e}")
-except Exception as e:
-    fatal(f"Gagal memproses endpoint: {e}")
+if __name__ == "__main__":
+    main()
