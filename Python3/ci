@@ -181,6 +181,7 @@ def main() -> None:
         "--build-arg", f"PORT={port}",
         "--build-arg", f"BRANCH={branch}",
         "--tag", full_image,
+        "--attest", "type=sbom",
         "--attest", "type=provenance,mode=max",
         "--push",
         "."
