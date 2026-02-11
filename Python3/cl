@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 cl - Fast Git Clone Tool
-Simple and fast repository cloning.
+Multi-account repository cloning with SSH key profiles.
 
 Usage:
-    cl repo                  # Full clone (default branch)
-    cl repo branch           # Full clone + checkout branch/tag
-    cl repo branch -s        # Fast single-branch clone (recommended)
+    cl repo                       # Interactive profile selection
+    cl repo -p kantor              # Clone from Bitbucket (loyaltoid)
+    cl repo -p pribadi             # Clone from GitHub (hegieswe)
+    cl repo -p project             # Clone from GitHub (TrueChainID)
+    cl repo branch -p kantor -s    # Fast single-branch clone
 """
 
 import sys
@@ -21,9 +23,39 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
-DEFAULT_WORKSPACE = "loyaltoid"
-DEFAULT_GIT_HOST = "bitbucket.org"
-VERSION = "3.0.0"
+VERSION = "4.0.0"
+
+# SSH key directory
+SSH_DIR = Path.home() / ".ssh"
+
+# Account profiles: name -> (ssh_key_file, git_host, workspace, label)
+PROFILES = {
+    "kantor": {
+        "ssh_key": "id_ed25519_bitbucket_kantor",
+        "host": "bitbucket.org",
+        "workspace": "loyaltoid",
+        "label": "Bitbucket Kantor",
+        "icon": "🏢",
+    },
+    "pribadi": {
+        "ssh_key": "id_ed25519_github_pribadi",
+        "host": "github.com",
+        "workspace": "hegieswe",
+        "label": "GitHub Pribadi",
+        "icon": "👤",
+    },
+    "project": {
+        "ssh_key": "id_ed25519_github_project",
+        "host": "github.com",
+        "workspace": "TrueChainID",
+        "label": "GitHub Project",
+        "icon": "🚀",
+    },
+}
+
+DEFAULT_PROFILE = "kantor"
+CONFIG_DIR = Path.home() / ".config" / "cl"
+CONFIG_FILE = CONFIG_DIR / "profile"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STYLING
@@ -138,11 +170,62 @@ def fatal(msg):
     print(f"  {Style.RED}{Icon.ERROR}{Style.RESET} {Style.BOLD}{msg}{Style.RESET}")
     sys.exit(1)
 
+def get_default_profile():
+    """Read saved default profile from config file."""
+    try:
+        if CONFIG_FILE.exists():
+            saved = CONFIG_FILE.read_text().strip()
+            if saved in PROFILES:
+                return saved
+    except (OSError, IOError):
+        pass
+    return DEFAULT_PROFILE
+
+def save_default_profile(profile_name):
+    """Save default profile to config file."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(profile_name)
+        return True
+    except (OSError, IOError) as e:
+        print(f"  {Style.RED}{Icon.ERROR}{Style.RESET} Failed to save config: {e}")
+        return False
+
+def print_profiles():
+    """Display all available profiles with status."""
+    current_default = get_default_profile()
+    
+    print()
+    print(f"  {Style.CYAN}{Style.BOLD}📋 Available Profiles{Style.RESET}  {Style.DIM}(v{VERSION}){Style.RESET}")
+    print(f"  {Style.DIM}{'━' * 60}{Style.RESET}")
+    
+    for key, p in PROFILES.items():
+        ssh_key_path = SSH_DIR / p["ssh_key"]
+        ssh_exists = ssh_key_path.exists()
+        ssh_status = f"{Style.GREEN}{Icon.SUCCESS} Ready" if ssh_exists else f"{Style.RED}{Icon.ERROR} Missing"
+        
+        is_default = key == current_default
+        marker = f"{Style.GREEN}▸" if is_default else " "
+        default_tag = f" {Style.GREEN}{Style.BOLD}[DEFAULT]{Style.RESET}" if is_default else ""
+        
+        print(f"  {marker} {p['icon']}  {Style.BOLD}{key}{Style.RESET}{default_tag}")
+        print(f"      {Style.DIM}Label     :{Style.RESET} {p['label']}")
+        print(f"      {Style.DIM}Host      :{Style.RESET} {p['host']}")
+        print(f"      {Style.DIM}Workspace :{Style.RESET} {p['workspace']}")
+        print(f"      {Style.DIM}SSH Key   :{Style.RESET} {p['ssh_key']}  {ssh_status}{Style.RESET}")
+        print(f"      {Style.DIM}Key Path  :{Style.RESET} {Style.DIM}{ssh_key_path}{Style.RESET}")
+        print()
+    
+    print(f"  {Style.DIM}{'━' * 60}{Style.RESET}")
+    print(f"  {Style.DIM}Default profile: {Style.RESET}{Style.BOLD}{current_default}{Style.RESET}")
+    print(f"  {Style.DIM}Change default : {Style.RESET}{Style.DIM}cl --set-default <profile>{Style.RESET}")
+    print()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GIT OPERATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
-def clone_with_progress(cmd, spinner):
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def clone_with_progress(cmd, spinner, env=None):
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     output = []
     for line in iter(proc.stderr.readline, ''):
         output.append(line)
@@ -159,29 +242,76 @@ def clone_with_progress(cmd, spinner):
     proc.wait()
     return proc.returncode, ''.join(output)
 
-def run_clone(repo, ref, single_branch, workspace, host):
+def select_profile_interactive():
+    """Interactive profile selection menu."""
+    print()
+    print(f"  {Style.CYAN}{Style.BOLD}Select Account Profile:{Style.RESET}")
+    print(f"  {Style.DIM}{'─' * 45}{Style.RESET}")
+    
+    profile_keys = list(PROFILES.keys())
+    for idx, key in enumerate(profile_keys, 1):
+        p = PROFILES[key]
+        ssh_status = f"{Style.GREEN}{Icon.SUCCESS}" if (SSH_DIR / p["ssh_key"]).exists() else f"{Style.RED}{Icon.ERROR}"
+        print(f"  {Style.BOLD}{idx}{Style.RESET}) {p['icon']}  {p['label']:<20} {Style.DIM}({p['host']}/{p['workspace']}){Style.RESET}  {ssh_status}{Style.RESET}")
+    
+    print(f"  {Style.DIM}{'─' * 45}{Style.RESET}")
+    print()
+    
+    while True:
+        try:
+            choice = input(f"  {Style.CYAN}▸{Style.RESET} Choose [1-{len(profile_keys)}]: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(profile_keys):
+                selected = profile_keys[int(choice) - 1]
+                print(f"  {Style.GREEN}{Icon.SUCCESS}{Style.RESET} Using profile: {Style.BOLD}{PROFILES[selected]['label']}{Style.RESET}")
+                return selected
+            print(f"  {Style.RED}{Icon.ERROR} Invalid choice, try again.{Style.RESET}")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(130)
+
+def get_ssh_env(profile):
+    """Build environment with GIT_SSH_COMMAND for the profile's SSH key."""
+    p = PROFILES[profile]
+    ssh_key_path = SSH_DIR / p["ssh_key"]
+    
+    if not ssh_key_path.exists():
+        fatal(f"SSH key not found: {ssh_key_path}")
+    
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key_path} -o IdentitiesOnly=yes"
+    return env
+
+def run_clone(repo, ref, single_branch, profile):
+    p = PROFILES[profile]
+    workspace = p["workspace"]
+    host = p["host"]
+    ssh_key = p["ssh_key"]
+    
     repo_dir = Path(repo)
     repo_url = f"git@{host}:{workspace}/{repo}.git"
     replaced = False
     
+    # Get SSH env
+    env = get_ssh_env(profile)
+    
     # Mode
-    mode_str = f"{Style.GREEN}Single Branch{Style.RESET} (depth: 1)" if single_branch else f"{Style.BLUE}Full Clone{Style.RESET}"
+    mode_plain = "Single Branch (depth: 1)" if single_branch else "Full Clone"
     
     # Build info lines for dynamic box width
     info_lines = [
         f"{Icon.REPO} Repository:  {repo}",
         f"{Icon.LINK} Source:      {repo_url}",
+        f"   Profile:     {p['label']} ({profile})",
+        f"   SSH Key:     {ssh_key}",
     ]
     if ref:
         info_lines.append(f"{Icon.BRANCH} Ref:         {ref}")
-    # Mode line (without ANSI for width calculation)
-    mode_plain = "Single Branch (depth: 1)" if single_branch else "Full Clone"
     info_lines.append(f"{Icon.MODE} Mode:        {mode_plain}")
     
     # Calculate box width
     max_len = max(len(line) for line in info_lines)
-    box_width = max_len + 4  # padding
-    box_width = max(box_width, 40)  # minimum
+    box_width = max_len + 4
+    box_width = max(box_width, 50)
     
     # Print header box
     title = "Repository Information"
@@ -189,11 +319,13 @@ def run_clone(repo, ref, single_branch, workspace, host):
     
     print()
     print(f"{Style.GREEN}{title_line}{Style.RESET}")
-    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.REPO} {Style.RED}Repository :{Style.RESET} {Style.GREEN}{repo}{Style.RESET}")
-    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.LINK} {Style.RED}Source     :{Style.RESET} {Style.GREEN}{repo_url}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.REPO}  {Style.RED}Repository :{Style.RESET} {Style.GREEN}{repo}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.LINK}  {Style.RED}Source     :{Style.RESET} {Style.GREEN}{repo_url}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{p['icon']}  {Style.RED}Profile    :{Style.RESET} {Style.GREEN}{p['label']}{Style.RESET} {Style.DIM}({profile}){Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}🔑  {Style.RED}SSH Key    :{Style.RESET} {Style.CYAN}{ssh_key}{Style.RESET}")
     if ref:
-        print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.BRANCH} {Style.RED}Ref        :{Style.RESET} {Style.GREEN}{ref}{Style.RESET}")
-    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.MODE} {Style.RED}Mode       :{Style.RESET} {Style.GREEN}{mode_plain}{Style.RESET}")
+        print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.BRANCH}  {Style.RED}Ref        :{Style.RESET} {Style.GREEN}{ref}{Style.RESET}")
+    print(f"{Style.GREEN}{Box.V}{Style.RESET}{Icon.MODE}  {Style.RED}Mode       :{Style.RESET} {Style.GREEN}{mode_plain}{Style.RESET}")
     print(f"{Style.GREEN}{Box.BL}{Box.H * box_width}{Box.BR}{Style.RESET}")
     print()
     
@@ -223,7 +355,7 @@ def run_clone(repo, ref, single_branch, workspace, host):
     spinner.start()
     
     try:
-        code, stderr = clone_with_progress(cmd, spinner)
+        code, stderr = clone_with_progress(cmd, spinner, env=env)
         if code != 0:
             spinner.stop(success=False, message="Clone failed")
             if stderr:
@@ -236,11 +368,23 @@ def run_clone(repo, ref, single_branch, workspace, host):
             shutil.rmtree(repo_dir, ignore_errors=True)
         sys.exit(130)
     
+    # Persist SSH key in repo config (so push/pull/fetch use correct key)
+    ssh_key_path = SSH_DIR / ssh_key
+    ssh_cmd = f"ssh -i {ssh_key_path} -o IdentitiesOnly=yes"
+    result = subprocess.run(
+        ["git", "config", "core.sshCommand", ssh_cmd],
+        cwd=repo_dir, capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print(f"  {Style.GREEN}{Icon.SUCCESS}{Style.RESET} SSH key configured for push/pull/fetch")
+    else:
+        print(f"  {Style.YELLOW}{Icon.WARN}{Style.RESET} Could not set SSH config: {result.stderr.strip()}")
+    
     # Checkout (full clone only)
     if ref and not single_branch:
         spinner = Spinner(f"Checking out {ref}...")
         spinner.start()
-        result = subprocess.run(["git", "checkout", ref], cwd=repo_dir, capture_output=True, text=True)
+        result = subprocess.run(["git", "checkout", ref], cwd=repo_dir, capture_output=True, text=True, env=env)
         if result.returncode == 0:
             spinner.stop(success=True, message=f"Checked out {ref}")
         else:
@@ -266,36 +410,52 @@ def run_clone(repo, ref, single_branch, workspace, host):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 def print_usage():
+    profiles_str = ", ".join(PROFILES.keys())
     print(f"""
 {Style.CYAN}{Style.BOLD}cl{Style.RESET} - Fast Git Clone Tool {Style.DIM}v{VERSION}{Style.RESET}
 
 {Style.BOLD}Usage:{Style.RESET}
-    cl <repo>                     Full clone (default branch)
-    cl <repo> <branch/tag>        Full clone + checkout branch/tag  
-    cl <repo> <branch/tag> -s     Fast single-branch clone {Style.GREEN}(recommended){Style.RESET}
+    cl <repo>                          Interactive profile selection
+    cl <repo> -p <profile>             Clone with specified profile
+    cl <repo> <branch/tag> -p <profile> -s   Fast single-branch clone
 
+{Style.BOLD}Profiles:{Style.RESET}""")
+    for key, p in PROFILES.items():
+        ssh_exists = (SSH_DIR / p["ssh_key"]).exists()
+        status = f"{Style.GREEN}{Icon.SUCCESS}" if ssh_exists else f"{Style.RED}{Icon.ERROR}"
+        print(f"    {p['icon']}  {Style.BOLD}{key:<10}{Style.RESET} {p['label']:<22} {Style.DIM}({p['host']}/{p['workspace']}){Style.RESET} {status}{Style.RESET}")
+    print(f"""
 {Style.BOLD}Options:{Style.RESET}
+    -p, --profile    Account profile ({profiles_str})
     -s, --single     Single-branch mode (faster clone)
-    -w, --workspace  Override workspace (default: {DEFAULT_WORKSPACE})
-    --host           Override git host (default: {DEFAULT_GIT_HOST})
+    -l, --list       List all profiles with status
+    --set-default    Set default profile
+    -w, --workspace  Override workspace from profile
+    --host           Override git host from profile
     -h, --help       Show this help
     -v, --version    Show version
 
 {Style.BOLD}Examples:{Style.RESET}
-    cl myrepo                     Clone repo with full history
-    cl myrepo main                Clone and checkout 'main' branch
-    cl myrepo v1.0.0 -s           Fast clone tag 'v1.0.0' only
+    cl myrepo -p kantor               Clone from Bitbucket (loyaltoid)
+    cl myrepo -p pribadi              Clone from GitHub (hegieswe)
+    cl myrepo -p project              Clone from GitHub (TrueChainID)
+    cl myrepo main -p kantor -s       Fast clone branch 'main'
+    cl myrepo                         Interactive profile selection
+    cl -l                             List all profiles
+    cl --set-default pribadi          Set default profile to pribadi
 
 {Style.BOLD}Note:{Style.RESET}
     If directory exists, it will be {Style.YELLOW}automatically replaced{Style.RESET}.
+    SSH keys are loaded from {Style.DIM}~/.ssh/{Style.RESET} based on profile.
 """)
 
 def main():
     args = sys.argv[1:]
     
     # Defaults
-    workspace = os.environ.get("CL_WORKSPACE", DEFAULT_WORKSPACE)
-    host = os.environ.get("CL_GIT_HOST", DEFAULT_GIT_HOST)
+    profile = None
+    workspace_override = None
+    host_override = None
     single_branch = False
     repo = None
     ref = None
@@ -311,14 +471,33 @@ def main():
         elif arg in ["-v", "--version"]:
             print(f"cl {VERSION}")
             sys.exit(0)
+        elif arg in ["-l", "--list"]:
+            print_profiles()
+            sys.exit(0)
+        elif arg == "--set-default" and i + 1 < len(args):
+            i += 1
+            new_default = args[i].lower()
+            if new_default not in PROFILES:
+                print(f"{Style.RED}{Icon.ERROR} Unknown profile '{new_default}'. Available: {', '.join(PROFILES.keys())}{Style.RESET}")
+                sys.exit(1)
+            if save_default_profile(new_default):
+                p = PROFILES[new_default]
+                print(f"  {Style.GREEN}{Icon.SUCCESS}{Style.RESET} Default profile set to: {p['icon']}  {Style.BOLD}{p['label']}{Style.RESET} {Style.DIM}({new_default}){Style.RESET}")
+            sys.exit(0)
         elif arg in ["-s", "--single"]:
             single_branch = True
+        elif arg in ["-p", "--profile"] and i + 1 < len(args):
+            i += 1
+            profile = args[i].lower()
+            if profile not in PROFILES:
+                print(f"{Style.RED}{Icon.ERROR} Unknown profile '{profile}'. Available: {', '.join(PROFILES.keys())}{Style.RESET}")
+                sys.exit(1)
         elif arg in ["-w", "--workspace"] and i + 1 < len(args):
             i += 1
-            workspace = args[i]
+            workspace_override = args[i]
         elif arg == "--host" and i + 1 < len(args):
             i += 1
-            host = args[i]
+            host_override = args[i]
         elif not arg.startswith("-"):
             positional.append(arg)
         else:
@@ -333,13 +512,23 @@ def main():
     repo = positional[0]
     ref = positional[1] if len(positional) > 1 else None
     
+    # Profile selection
+    if profile is None:
+        profile = select_profile_interactive()
+    
+    # Apply overrides if provided
+    if workspace_override:
+        PROFILES[profile]["workspace"] = workspace_override
+    if host_override:
+        PROFILES[profile]["host"] = host_override
+    
     # Check git
     try:
         subprocess.run(["git", "--version"], capture_output=True, timeout=5, check=True)
     except Exception:
         fatal("Git not found. Please install git.")
     
-    run_clone(repo, ref, single_branch, workspace, host)
+    run_clone(repo, ref, single_branch, profile)
 
 if __name__ == "__main__":
     try:
